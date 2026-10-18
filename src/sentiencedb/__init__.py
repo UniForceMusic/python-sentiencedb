@@ -10,6 +10,8 @@ A Python port of the PHP package ``sentience/database``::
 
 from __future__ import annotations
 
+from importlib.metadata import version as _version
+
 from .database import Database
 from .database_abc import DatabaseABC
 from .driver import Driver
@@ -75,7 +77,7 @@ from .results.result import Result
 from .results.result_abc import ResultABC
 from .sockets import NetworkSocket, SocketABC, UnixSocket
 
-__version__ = "2.0.0"
+__version__ = _version("sentiencedb")
 
 __all__ = [
     "AdapterError",

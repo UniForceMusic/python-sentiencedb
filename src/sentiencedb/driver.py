@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class Driver(StrEnum):
     """Supported database engines.
 
-    Concrete classes are imported lazily so that ``import sentiencedb`` never needs an optional driver package.
+    Concrete classes are imported lazily so that ``import sentiencedb`` never imports a driver package.
     """
 
     MARIADB = "mariadb"

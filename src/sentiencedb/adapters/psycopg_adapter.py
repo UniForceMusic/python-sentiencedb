@@ -36,7 +36,10 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
     ``ssl_root_cert``, ``ssl_crl``, ``client_encoding`` and ``search_path``.
     """
 
-    DRIVER_HINT = "PostgreSQL support needs psycopg: pip install 'sentiencedb[postgres]'"
+    DRIVER_HINT = (
+        "psycopg could not be imported; sentiencedb depends on it, so the installation is broken "
+        "(reinstall sentiencedb)"
+    )
 
     def __init__(
         self,

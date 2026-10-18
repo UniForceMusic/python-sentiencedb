@@ -8,10 +8,10 @@ sentiencedb is a Python port of the PHP package
 Python naming (`whereEquals` became `where_equals`). Version 2.0.0 is a rewrite; see [CHANGELOG.md](CHANGELOG.md)
 for the changes since 1.x.
 
-- Python 3.11 or newer, fully typed (`mypy --strict`), no runtime dependencies.
+- Python 3.11 or newer, fully typed (`mypy --strict`).
 - SQLite works out of the box with the standard library `sqlite3` module.
 - PostgreSQL uses [psycopg 3](https://www.psycopg.org/psycopg3/); MySQL and MariaDB use
-  [mysql-connector-python](https://dev.mysql.com/doc/connector-python/en/). Both are optional extras.
+  [mysql-connector-python](https://dev.mysql.com/doc/connector-python/en/). Both are installed with the package.
 
 ## Contents
 
@@ -45,13 +45,14 @@ for the changes since 1.x.
 ## Installation
 
 ```bash
-pip install sentiencedb                    # SQLite only
-pip install "sentiencedb[postgres]"        # + psycopg[binary] >= 3.1
-pip install "sentiencedb[mysql]"           # + mysql-connector-python >= 9.0 (MySQL and MariaDB)
-pip install "sentiencedb[postgres,mysql]"  # every engine
+pip install sentiencedb
 ```
 
-Driver packages are imported lazily, so `import sentiencedb` never requires them; only connecting to that engine does.
+This installs every engine: `psycopg[binary] >= 3.1` (PostgreSQL) and `mysql-connector-python >= 9.0` (MySQL and
+MariaDB) are regular dependencies; SQLite uses the standard library. The `postgres` and `mysql` extras of earlier
+versions still exist but are empty, so `pip install "sentiencedb[postgres,mysql]"` keeps working.
+
+Driver packages are imported lazily: `import sentiencedb` does not load them; connecting to that engine does.
 
 ## Quick start
 
@@ -1159,7 +1160,7 @@ print(Driver.MARIADB.dialect("10.5.0").returning, Driver.MYSQL.dialect("8.4.0").
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[postgres,mysql,dev]"
+.venv/bin/pip install -e ".[dev]"
 
 docker compose up -d                      # optional: PostgreSQL, MySQL and MariaDB test servers
 

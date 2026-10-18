@@ -1,10 +1,12 @@
-"""Package level guarantees: public API, optional drivers, exceptions and sockets."""
+"""Package level guarantees: public API, lazy driver imports, exceptions and sockets."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 import textwrap
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -14,7 +16,8 @@ from sentiencedb.sockets import NetworkSocket, UnixSocket
 
 
 def test_version() -> None:
-    assert sentiencedb.__version__ == "2.0.0"
+    pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
+    assert sentiencedb.__version__ == pyproject["project"]["version"]
 
 
 def test_every_public_name_is_importable() -> None:
@@ -22,7 +25,8 @@ def test_every_public_name_is_importable() -> None:
         assert hasattr(sentiencedb, name), name
 
 
-def test_imports_without_optional_drivers() -> None:
+def test_imports_without_drivers() -> None:
+    # The drivers are dependencies, but they are still imported lazily: importing the package must not load them.
     script = textwrap.dedent(
         """
         import sys

@@ -38,7 +38,7 @@ class DBAPIAdapter(AdapterABC, Generic[ConnectionT]):
     """
 
     DRIVER_HINT: ClassVar[str] = ""
-    """How to install the driver package; part of the error raised when it cannot be imported."""
+    """Part of the error raised when the driver package cannot be imported (a broken installation)."""
 
     def __init__(
         self,

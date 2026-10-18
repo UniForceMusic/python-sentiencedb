@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 2.0.1
+
+### Changed
+
+- `psycopg[binary] >= 3.1` and `mysql-connector-python >= 9.0` are now regular dependencies, so
+  `pip install sentiencedb` supports every engine. The `postgres` and `mysql` extras are kept but empty, so existing
+  `pip install "sentiencedb[postgres]"` / `"sentiencedb[mysql]"` commands still work.
+- Drivers are still imported lazily. When one cannot be imported, the `AdapterError` now says the installation is
+  broken instead of suggesting an extra.
+
 ## 2.0.0
 
 A rewrite from scratch, ported again from the PHP package

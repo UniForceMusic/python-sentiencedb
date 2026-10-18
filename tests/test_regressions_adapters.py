@@ -433,12 +433,14 @@ def test_sqlite_last_insert_id_is_none_before_any_insert() -> None:
         assert db.last_insert_id() is None
 
 
-@pytest.mark.parametrize(("method", "extra"), [("connect_postgresql", "postgres"), ("connect_mysql", "mysql")])
-def test_missing_driver_package_names_the_extra(monkeypatch: pytest.MonkeyPatch, method: str, extra: str) -> None:
+@pytest.mark.parametrize(
+    ("method", "package"), [("connect_postgresql", "psycopg"), ("connect_mysql", "mysql-connector-python")]
+)
+def test_missing_driver_package_names_it(monkeypatch: pytest.MonkeyPatch, method: str, package: str) -> None:
     for module in ("psycopg", "mysql", "mysql.connector"):
         monkeypatch.setitem(sys.modules, module, None)
 
-    with pytest.raises(AdapterError, match=rf"sentiencedb\[{extra}\]") as error:
+    with pytest.raises(AdapterError, match=rf"^{package} could not be imported.*reinstall sentiencedb") as error:
         getattr(Database, method)("x")
 
     assert isinstance(error.value.__cause__, ImportError)

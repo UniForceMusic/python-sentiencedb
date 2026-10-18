@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentiencedb"
-dynamic = ["version"]
+version = "2.0.1"
 description = "A Python database abstraction layer supporting PostgreSQL, SQLite, MySQL and MariaDB."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,27 +29,27 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "mysql-connector-python>=9.0",
+]
 
 [project.urls]
 Repository = "https://github.com/UniForceMusic/python-sentiencedb"
 Changelog = "https://github.com/UniForceMusic/python-sentiencedb/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-postgres = [
-    "psycopg[binary]>=3.1",
-]
-mysql = [
-    "mysql-connector-python>=9.0",
-]
+# Both drivers are regular dependencies since 2.0.1; these extras stay (empty) so existing
+# `pip install "sentiencedb[postgres]"` / `"sentiencedb[mysql]"` commands keep working.
+postgres = []
+mysql = []
 dev = [
     "pytest>=8.0",
     "mypy>=1.10",
     "ruff>=0.6",
+    "build>=1.2",
+    "twine>=6.0",
 ]
-
-[tool.setuptools.dynamic]
-version = {attr = "sentiencedb.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

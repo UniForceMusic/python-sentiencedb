@@ -43,8 +43,8 @@ class AdapterABC(ABC):
     :param queries: Statements run on every new connection, after the adapter's own setup.
     :param options: Connection options.
     :param debug: Statement callback.
-    :raises AdapterError: Invalid configuration (e.g. a server driver without a socket), or the driver package is
-        not installed.
+    :raises AdapterError: Invalid configuration (e.g. a server driver without a socket), or the driver package
+        cannot be imported (a broken installation).
     :raises ConnectionFailedError: The initial connection could not be opened.
     """
 

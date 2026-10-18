@@ -49,7 +49,10 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     Options: ``charset``, ``collation`` and ``engine``.
     """
 
-    DRIVER_HINT = "MySQL and MariaDB support needs mysql-connector-python: pip install 'sentiencedb[mysql]'"
+    DRIVER_HINT = (
+        "mysql-connector-python could not be imported; sentiencedb depends on it, so the installation is broken "
+        "(reinstall sentiencedb)"
+    )
 
     def __init__(
         self,

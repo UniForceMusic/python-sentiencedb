@@ -7,7 +7,7 @@ since 1.x and the PHP bugs that were deliberately not ported.
 ## Setup and commands
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # = pip install -e ".[postgres,mysql,dev]"
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # = pip install -e ".[dev]"
 docker compose up -d   # optional: PostgreSQL :5432 (postgres, trust), MySQL :3306, MariaDB :3307 (root, no password)
 ```
 
@@ -20,6 +20,7 @@ docker compose up -d   # optional: PostgreSQL :5432 (postgres, trust), MySQL :33
 | `.venv/bin/python -m ruff check src/sentiencedb tests` | Lint. |
 | `.venv/bin/python -m ruff format --check src/sentiencedb tests` | Format check (line length 120). |
 | `.venv/bin/python main.py [--postgresql] [--mysql] [--mariadb] [--debug]` | Example script; SQLite only by default. |
+| `./publish.sh [--test] [--dry-run] [--yes]` | Check, build, smoke-test and upload to PyPI, then tag `v<version>`. Token: `PYPI_API_KEY` (env or `.env`). |
 
 All of these must pass before handing work back. No Makefile, CI or pre-commit hooks exist.
 
@@ -71,7 +72,10 @@ db.select("t").where_equals("id", 1).execute()
   dialects consume plain value objects only (never builders or mixins). A `Query` used as a value is a sub-select.
 - Builders pass every keyword to the dialect statement method (tests record the exact call).
 - `psycopg` and `mysql.connector` are imported lazily inside functions (only `TYPE_CHECKING` imports at module level);
-  `tests/test_package.py` enforces it. No runtime dependencies.
+  `tests/test_package.py` enforces it. Both drivers are runtime dependencies (since 2.0.1; the `postgres` /
+  `mysql` extras are kept empty for compatibility), so an `ImportError` there means a broken install.
+- The version lives only in `pyproject.toml` (`[project] version`); `__version__` reads the installed metadata, so
+  re-run `.venv/bin/pip install -e .` after bumping it (`test_version` compares the two).
 - Docstrings on public classes and methods, no comments that restate code, no `print` in the package, no `Any` in
   public signatures except row values and `**kwargs`.
 
