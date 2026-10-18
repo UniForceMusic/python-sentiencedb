@@ -213,9 +213,35 @@ def test_emulated_upsert_returns_the_updated_row(insert: InsertQuery, mock_datab
 
     assert result.fetch_dicts() == [{"id": 1, "name": "b"}]
     assert _calls(legacy_dialect) == ["select", "update", "select"]
-    assert legacy_dialect.calls[1][1]["returning"] == ("name",)
+    assert legacy_dialect.calls[1][1]["returning"] is None
     assert legacy_dialect.calls[2][1]["where"] == (Condition(ConditionEnum.EQUALS, "email", "a"),)
     assert legacy_dialect.calls[2][1]["limit"] == 1
+
+
+@pytest.mark.parametrize(
+    ("update_returning", "calls", "update_kwarg"),
+    [(True, ["select", "update"], ("name",)), (False, ["select", "update", "select"], None)],
+)
+def test_emulated_upsert_update_path_follows_update_returning(
+    update_returning: bool,
+    calls: list[str],
+    update_kwarg: tuple[str, ...] | None,
+    insert: InsertQuery,
+    mock_database: Any,
+    recording_dialect: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MariaDB has ``INSERT .. RETURNING`` but no ``UPDATE .. RETURNING``: the update path selects the row back."""
+    monkeypatch.setattr(type(recording_dialect), "update_returning", property(lambda self: update_returning))
+    updated = Result({"name": None}, [{"name": "b"}])
+    mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 1}]), updated, updated]
+
+    insert.values({"email": "a", "name": "b"}).on_conflict_do_update(["email"]).returning(["name"])
+    result = insert.emulate_on_conflict("id").execute()
+
+    assert result.fetch_dicts() == [{"name": "b"}]
+    assert _calls(recording_dialect) == calls
+    assert recording_dialect.calls[1][1]["returning"] == update_kwarg
 
 
 @pytest.mark.parametrize(("returning", "expected"), [(None, ({}, [])), (["id"], ({"id": "INTEGER"}, [{"id": 1}]))])

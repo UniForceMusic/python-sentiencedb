@@ -41,6 +41,7 @@ def test_imports_without_optional_drivers() -> None:
         import sentiencedb.queries
         import sentiencedb.results
         import sentiencedb.schemas
+        from sentiencedb import Database, Driver, HavingGroup, Join, SelectQuery, WhereGroup, raw
         """
     )
 

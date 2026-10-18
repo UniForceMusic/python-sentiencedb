@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from ..exceptions import QueryError
@@ -11,7 +11,7 @@ from ..queries.enums import TypeEnum
 from .sql_dialect import SQLDialect
 
 if TYPE_CHECKING:
-    from ..queries.objects.clauses import Condition, OnConflict
+    from ..queries.objects.clauses import Condition, OnConflict, UnionClause
     from ..queries.objects.ddl import (
         AddForeignKeyConstraint,
         AddPrimaryKeys,
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
         DropConstraint,
         RenameColumn,
     )
-    from ..queries.type_aliases import Scalar
+    from ..queries.type_aliases import Scalar, Value
 
 _LIKE_TOKEN = re.compile(r"\\(.)|[%_*?\[\]]", re.DOTALL)
 
@@ -51,6 +51,13 @@ class SQLiteDialect(SQLDialect):
     LATERAL: ClassVar[bool] = False
     TABLE_EXISTS: ClassVar[bool] = True
 
+    def _build_unions(self, params: list[Scalar], query: str, unions: Sequence[UnionClause]) -> str:
+        """SQLite rejects parenthesised compound members, so each member is wrapped as ``SELECT * FROM (<select>)``,
+        which also keeps a member's own ``ORDER BY`` / ``LIMIT``."""
+        return f"SELECT * FROM ({query})" + "".join(
+            f" {union.union} SELECT * FROM {self._build_sub_query(params, union.select_query)}" for union in unions
+        )
+
     def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:
         """Case sensitive ``LIKE`` becomes ``GLOB`` (SQLite's ``LIKE`` ignores ASCII case); case insensitive ``LIKE``
         declares the backslash as its escape character."""
@@ -78,6 +85,18 @@ class SQLiteDialect(SQLDialect):
             return super()._build_condition_regex(params, condition)
 
         return self._build_condition_regex_operator(params, condition, "REGEXP", "NOT REGEXP")
+
+    def _build_row(self, params: list[Scalar], columns: Sequence[str], row: Mapping[str, Value]) -> str:
+        """SQLite has no ``DEFAULT`` keyword inside ``VALUES``.
+
+        :raises QueryError: The row lacks one of the insert's columns.
+        """
+        if any(column not in row for column in columns):
+            raise QueryError(
+                "SQLite does not support DEFAULT in VALUES: every row of a multi-row insert must have the same columns"
+            )
+
+        return super()._build_row(params, columns, row)
 
     def _build_on_conflict(
         self,

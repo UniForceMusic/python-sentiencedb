@@ -282,7 +282,12 @@ class DialectABC(ABC):
     @property
     @abstractmethod
     def returning(self) -> bool:
-        """``RETURNING`` clauses."""
+        """``RETURNING`` clauses on ``INSERT`` and ``DELETE``."""
+
+    @property
+    @abstractmethod
+    def update_returning(self) -> bool:
+        """``RETURNING`` clauses on ``UPDATE``."""
 
     @property
     @abstractmethod

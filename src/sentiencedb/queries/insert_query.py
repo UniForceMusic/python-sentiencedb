@@ -183,13 +183,13 @@ class InsertQuery(ReturningMixin, Query):
         for column, value in conflict.items():
             update_query.where_equals(column, value)
 
-        if self._returning is not None:
-            update_query.returning(self._returning)
+        if self._returning is None:
+            return update_query.execute(emulate_prepare)
 
-        result = update_query.execute(emulate_prepare)
+        if not self._emulate_returning and self._dialect.update_returning:
+            return update_query.returning(self._returning).execute(emulate_prepare)
 
-        if self._returning is None or not self._emulates_returning():
-            return result
+        update_query.execute(emulate_prepare)
 
         return self._select(conflict, 1, emulate_prepare)
 

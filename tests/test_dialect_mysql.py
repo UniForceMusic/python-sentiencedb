@@ -174,6 +174,7 @@ class TestInsert:
         assert mariadb("10.4.0").delete(table="t", returning=[]).query == "DELETE FROM `t`"
 
     def test_update_never_returns(self, mariadb_dialect: MySQLDialect) -> None:
+        assert (mariadb_dialect.returning, mariadb_dialect.update_returning) == (True, False)
         assert mariadb_dialect.update(table="t", updates={"a": 1}, returning=[]).query == "UPDATE `t` SET `a` = ?"
 
 
@@ -244,3 +245,10 @@ class TestAlterAndIndexes:
             "DROP INDEX `i` ON `db`.`t`"
         )
         assert mysql_dialect.drop_table(table="t", if_exists=True).query == "DROP TABLE IF EXISTS `t`"
+
+    @pytest.mark.parametrize("driver", [Driver.MYSQL, Driver.MARIADB])
+    def test_partial_indexes_are_unsupported(self, driver: Driver) -> None:
+        dialect = MySQLDialect(driver, "11.4.4")
+
+        with pytest.raises(QueryError, match="partial indexes"):
+            dialect.create_index(table="t", name="i", columns=["a"], where=[Condition(ConditionEnum.EQUALS, "a", 1)])

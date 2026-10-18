@@ -118,9 +118,7 @@ class SQLDialect(DialectABC):
         )
 
         if unions:
-            query = f"({query})" + "".join(
-                f" {union.union} {self._build_sub_query(params, union.select_query)}" for union in unions
-            )
+            query = self._build_unions(params, query, unions)
 
         return QueryWithParams(query, params)
 
@@ -169,7 +167,7 @@ class SQLDialect(DialectABC):
             "SET",
             self._build_set(params, updates),
             self._build_clause("WHERE", params, where),
-            self._build_returning(returning),
+            self._build_returning(returning if self.update_returning else None),
         )
 
         return QueryWithParams(query, params)
@@ -331,6 +329,12 @@ class SQLDialect(DialectABC):
             return sql
 
         return f"{sql} ON {self.cast_to_query(True)}"
+
+    def _build_unions(self, params: list[Scalar], query: str, unions: Sequence[UnionClause]) -> str:
+        """``(<select>) UNION (<select>) ..``."""
+        return f"({query})" + "".join(
+            f" {union.union} {self._build_sub_query(params, union.select_query)}" for union in unions
+        )
 
     def _build_group_by(self, group_by: Sequence[IdentifierLike]) -> str:
         return f"GROUP BY {self._escape_all(group_by)}" if group_by else ""
@@ -889,6 +893,10 @@ class SQLDialect(DialectABC):
     @property
     def returning(self) -> bool:
         return self.RETURNING
+
+    @property
+    def update_returning(self) -> bool:
+        return self.returning
 
     @property
     def savepoints(self) -> bool:

@@ -10,7 +10,7 @@ import pytest
 from sentiencedb import Driver, QueryError
 from sentiencedb.dialects import SQLiteDialect
 from sentiencedb.options import Options
-from sentiencedb.queries.enums import ConditionEnum, JoinEnum, TypeEnum
+from sentiencedb.queries.enums import ConditionEnum, JoinEnum, TypeEnum, UnionEnum
 from sentiencedb.queries.helpers import escape_backslash
 from sentiencedb.queries.objects import (
     AddColumn,
@@ -29,6 +29,7 @@ from sentiencedb.queries.objects import (
     OnConflict,
     RenameColumn,
     Type,
+    UnionClause,
     UniqueConstraint,
 )
 from sentiencedb.queries.query import Query
@@ -152,6 +153,23 @@ class TestSelect:
             'SELECT * FROM "t" LEFT JOIN "x" ON 1'
         )
 
+    def test_unions_without_parenthesised_members(
+        self, sqlite_dialect: SQLiteDialect, static_query: StaticQuery, connection: sqlite3.Connection
+    ) -> None:
+        connection.execute('CREATE TABLE "t" ("a" INTEGER)')
+        connection.execute('INSERT INTO "t" VALUES (1), (2), (3)')
+        query_with_params = sqlite_dialect.select(
+            table="t",
+            where=[Condition(ConditionEnum.EQUALS, "a", 1)],
+            unions=[UnionClause(UnionEnum.UNION_ALL, static_query('SELECT * FROM "t" ORDER BY "a" DESC LIMIT ?', [1]))],
+        )
+
+        assert query_with_params.query == (
+            'SELECT * FROM (SELECT * FROM "t" WHERE "a" = ?)'
+            ' UNION ALL SELECT * FROM (SELECT * FROM "t" ORDER BY "a" DESC LIMIT ?)'
+        )
+        assert connection.execute(query_with_params.query, list(query_with_params.params)).fetchall() == [(1,), (3,)]
+
 
 class TestInsert:
     def test_upsert_and_returning(self, sqlite_dialect: SQLiteDialect, connection: sqlite3.Connection) -> None:
@@ -169,6 +187,18 @@ class TestInsert:
             ' DO UPDATE SET "email" = excluded."email", "n" = excluded."n" RETURNING "id", "n"'
         )
         assert connection.execute(query_with_params.query, list(query_with_params.params)).fetchall() == [(1, 5)]
+
+    def test_rows_with_the_same_columns(self, sqlite_dialect: SQLiteDialect, connection: sqlite3.Connection) -> None:
+        connection.execute('CREATE TABLE "t" ("a" INTEGER, "b" INTEGER DEFAULT 7)')
+        query_with_params = sqlite_dialect.insert(table="t", values=[{"a": 1, "b": 2}, {"b": 4, "a": 3}])
+        connection.execute(query_with_params.query, list(query_with_params.params))
+
+        assert query_with_params.query == 'INSERT INTO "t" ("a", "b") VALUES (?, ?), (?, ?)'
+        assert connection.execute('SELECT * FROM "t"').fetchall() == [(1, 2), (3, 4)]
+
+    def test_default_in_values_is_unsupported(self, sqlite_dialect: SQLiteDialect) -> None:
+        with pytest.raises(QueryError, match="DEFAULT in VALUES"):
+            sqlite_dialect.insert(table="t", values=[{"a": 1, "b": 2}, {"a": 3}])
 
     def test_named_constraints_are_unsupported(self, sqlite_dialect: SQLiteDialect) -> None:
         with pytest.raises(QueryError, match="named constraints"):

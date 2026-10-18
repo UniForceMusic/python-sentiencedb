@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, ClassVar
 
 from ..driver import Driver
+from ..exceptions import QueryError
 from ..queries.enums import TypeEnum
 from ..queries.objects.ddl import Type
 from ..queries.objects.query_with_params import QueryWithParams
@@ -48,17 +49,26 @@ class MySQLDialect(SQLDialect):
         """Whether this dialect targets MariaDB rather than MySQL."""
         return self.driver == Driver.MARIADB
 
-    def update(
+    def create_index(
         self,
         *,
         table: IdentifierLike,
-        updates: Mapping[str, Value],
+        name: str,
+        columns: Sequence[str],
+        unique: bool = False,
+        if_not_exists: bool = False,
         where: Sequence[ConditionNode] = (),
-        returning: Sequence[str] | None = None,
     ) -> QueryWithParams:
-        """Like :meth:`SQLDialect.update`, but without ``RETURNING``: MariaDB only supports it on ``INSERT`` and
-        ``DELETE``."""
-        return super().update(table=table, updates=updates, where=where, returning=None)
+        """Like :meth:`SQLDialect.create_index`, but MySQL and MariaDB have no partial indexes.
+
+        :raises QueryError: ``where`` is not empty.
+        """
+        if where:
+            raise QueryError("MySQL and MariaDB do not support partial indexes")
+
+        return super().create_index(
+            table=table, name=name, columns=columns, unique=unique, if_not_exists=if_not_exists, where=where
+        )
 
     def begin_transaction(self) -> QueryWithParams:
         return QueryWithParams("START TRANSACTION")
@@ -186,6 +196,11 @@ class MySQLDialect(SQLDialect):
     @property
     def returning(self) -> bool:
         return self.mariadb and self.version >= 100500
+
+    @property
+    def update_returning(self) -> bool:
+        """MariaDB supports ``RETURNING`` on ``INSERT`` and ``DELETE`` only."""
+        return False
 
     @property
     def table_exists(self) -> bool:
