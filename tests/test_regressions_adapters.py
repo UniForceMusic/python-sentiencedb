@@ -622,3 +622,32 @@ def test_server_thread_pool_with_more_workers_than_connections(pg: Database) -> 
 
     assert pg.query("SELECT count(*) FROM t").scalar() == 24
     assert len(backend_ids) >= 2
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(9.95, "9.95"), (0.0, "0.0"), (-1.5e-29, "-1.5E-29"), (1e300, "1e+300"), (-1e-300, "-1e-300")],
+)
+def test_mysql_floats_are_bound_losslessly(value: float, expected: str) -> None:
+    from sentiencedb.adapters.mysql_connector_adapter import _exact_float
+
+    assert str(_exact_float(value)) == expected
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("emulate_prepare", [False, True])
+def test_mysql_float_round_trip(my: Database, emulate_prepare: bool) -> None:
+    values = [9.95, 0.1 + 0.2, 123456789.123456789, 1.5e-31, 1.234e40, 1e300, -1e-300, 2.0**60, 0.0]
+    my.exec("CREATE TABLE f (id int, d double, p decimal(10, 2))")
+
+    for number, value in enumerate(values):
+        my.prepared("INSERT INTO f (id, d) VALUES (?, ?)", [number, value], emulate_prepare)
+
+    assert [row["d"] for row in my.query("SELECT d FROM f ORDER BY id")] == values
+
+    for number, value in enumerate(values):
+        assert my.prepared("SELECT id FROM f WHERE d = ?", [value], emulate_prepare).scalar() == number
+
+    my.prepared("INSERT INTO f (id, p) VALUES (?, ?)", [99, 9.95], emulate_prepare)
+
+    assert my.prepared("SELECT id FROM f WHERE p = ?", [9.95], emulate_prepare).scalar() == 99

@@ -283,7 +283,7 @@ def only(db: Database, *drivers: Driver) -> None:
 
 
 @pytest.mark.parametrize("emulate_prepare", [False, True])
-def test_m1_cast_equals(db: Database, emulate_prepare: bool, request: pytest.FixtureRequest) -> None:
+def test_m1_cast_equals(db: Database, emulate_prepare: bool) -> None:
     (
         db.create_table("p")
         .integer("id")
@@ -295,11 +295,6 @@ def test_m1_cast_equals(db: Database, emulate_prepare: bool, request: pytest.Fix
     db.insert("p").values({"id": 2, "price": Decimal("10.40"), "at": datetime(2024, 12, 31, 23, 59, 59)}).execute()
 
     assert ids(db.select("p").where_equals("at", datetime(2024, 5, 1, 10), cast=True), emulate_prepare) == [1]
-
-    if db.dialect.driver in (Driver.MYSQL, Driver.MARIADB) and not emulate_prepare:
-        request.applymarker(
-            pytest.mark.xfail(reason="mysql.connector's C extension binds floats as single precision", strict=False)
-        )
 
     assert ids(db.select("p").where_equals("price", 9.95, cast=True), emulate_prepare) == [1]
 

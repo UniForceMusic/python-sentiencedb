@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import TYPE_CHECKING, cast
 
 from ..exceptions import AdapterError
@@ -16,6 +18,7 @@ from ._errors import map_mysql_connector_error
 if TYPE_CHECKING:
     from mysql.connector.abstracts import MySQLConnectionAbstract
 
+    from ..dialects.dialect_abc import DialectABC
     from ..driver import Driver
     from ..exceptions import DriverError
     from ..options import DebugCallback, Options
@@ -33,6 +36,12 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     parameters run as server side prepared statements, which understand the dialect's ``?`` placeholders natively.
     Results are read completely before the statement returns, so the connection is immediately free for the next
     one. MySQL and MariaDB store no UTC offset, so aware datetimes are bound in UTC.
+
+    The C extension binds a ``float`` parameter as a single precision ``FLOAT`` (``9.95`` arrives as
+    ``9.949999809265137``), so finite floats are bound losslessly instead: as a ``DECIMAL`` from their shortest
+    ``repr`` (``1e-30 <= |x| < 1e30``, where the server parses it exactly) or else as that ``repr`` text, which the
+    server converts to ``DOUBLE``. Stored values and comparisons are exact; a float selected straight back
+    (``SELECT ?``) comes back as a ``Decimal`` (or text). ``inf`` and ``nan`` are passed on unchanged.
 
     The C extension decodes a bound ``bytes`` parameter that is selected back directly (``SELECT ?``) as text; values
     read from ``BLOB``/``BINARY`` columns, and emulated prepares, are unaffected.
@@ -151,8 +160,25 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
         finally:
             cursor.close()
 
+    def _cast(self, dialect: DialectABC, value: Scalar) -> Scalar:
+        value = dialect.cast_to_driver(value)
+
+        if isinstance(value, float) and math.isfinite(value):
+            return _exact_float(value)
+
+        return value
+
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
         return map_mysql_connector_error(error, query, connecting=connecting)
+
+
+def _exact_float(value: float) -> Decimal | str:
+    """``value`` in a form mysql-connector binds without losing precision (see :class:`MySQLConnectorAdapter`)."""
+    if value == 0 or 1e-30 <= abs(value) < 1e30:
+        return Decimal(repr(value))
+
+    # Beyond the range the server parses DECIMAL literals exactly in, e.g. 1e300 would become 1e65.
+    return repr(value)
 
 
 __all__ = ["MySQLConnectorAdapter"]
