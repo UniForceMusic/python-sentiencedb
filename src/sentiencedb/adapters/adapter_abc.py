@@ -28,9 +28,9 @@ class AdapterABC(ABC):
     * **Autocommit.** Every statement commits immediately unless a transaction was started with
       :meth:`begin_transaction`, which runs the dialect's ``BEGIN`` statement.
     * **Placeholders.** :meth:`query_with_params` receives ``?`` placeholders and converts them to the driver's
-      paramstyle; every parameter goes through :meth:`DialectABC.cast_to_driver` first. Before that, ``Enum``
-      members are replaced by their value and, on engines without a time zone type (MySQL, MariaDB, SQLite),
-      timezone-aware datetimes are converted to UTC and bound without offset. Naive datetimes are bound as they are.
+      paramstyle; every parameter goes through :meth:`DialectABC.cast_to_driver` first, after ``Enum`` members are
+      replaced by their value. On engines without a time zone type (MySQL, MariaDB, SQLite) the dialect converts
+      timezone-aware datetimes to UTC and binds them without offset; naive datetimes are bound as they are.
     * **Errors.** Driver exceptions are re-raised as :class:`~sentiencedb.exceptions.DriverError` subclasses with
       the original as ``__cause__``.
     * **Debugging.** When a ``debug`` callback is set it is called after every statement with the interpolated SQL,

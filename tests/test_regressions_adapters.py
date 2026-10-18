@@ -91,7 +91,7 @@ def test_unbalanced_savepoint_left_by_a_failing_callback_is_rolled_back(file_db:
 
     assert file_db.in_transaction() is False
     assert ids(file_db) == []
-    assert file_db._thread.savepoints == []  # type: ignore[attr-defined]
+    assert file_db._thread.savepoints == []
 
 
 def test_unbalanced_savepoint_left_by_a_succeeding_callback_is_committed(file_db: Database) -> None:
@@ -119,7 +119,7 @@ def test_nested_transaction_rolls_back_only_its_own_savepoint(file_db: Database)
             db.transaction(inner)
 
         assert db.in_transaction() is True
-        assert db._thread.savepoints == []  # type: ignore[attr-defined]
+        assert db._thread.savepoints == []
         db.exec("INSERT INTO t VALUES (4)")
 
     file_db.transaction(outer)
@@ -144,7 +144,7 @@ def test_savepoint_is_pushed_only_after_it_was_created() -> None:
     with pytest.raises(OperationalError):
         db.begin_transaction()
 
-    assert db._thread.savepoints == []  # type: ignore[attr-defined]
+    assert db._thread.savepoints == []
 
 
 def test_failing_rollback_does_not_replace_the_original_error() -> None:
@@ -185,7 +185,7 @@ def test_nesting_without_savepoint_support_raises() -> None:
         def savepoints(self) -> bool:
             return False
 
-    db._dialect = NoSavepoints(Driver.SQLITE, "3.45.1")  # type: ignore[attr-defined]
+    db._dialect = NoSavepoints(Driver.SQLITE, "3.45.1")
 
     with pytest.raises(AdapterError):
         db.begin_transaction()
@@ -203,7 +203,7 @@ def test_commit_and_rollback_by_savepoint_name(tmp_path: Path) -> None:
         db.begin_transaction("c")
         db.rollback_transaction(name="b")  # ROLLBACK TO b, dropping c
 
-        assert db._thread.savepoints == ["a"]  # type: ignore[attr-defined]
+        assert db._thread.savepoints == ["a"]
 
         with pytest.raises(AdapterError):
             db.commit_transaction(name="missing")
@@ -525,7 +525,7 @@ def test_pg_failed_savepoint_in_an_aborted_transaction_leaves_no_transaction(pg:
     with pytest.raises(DriverError, match="aborted"):
         pg.transaction(outer)
 
-    assert pg._thread.savepoints == []  # type: ignore[attr-defined]
+    assert pg._thread.savepoints == []
     assert pg.in_transaction() is False
     assert pg.query("SELECT 1 AS one").scalar() == 1
 

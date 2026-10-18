@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from unittest.mock import create_autospec
 
 import pytest
 
@@ -16,9 +17,13 @@ from sentiencedb import (
     raw,
     sub_query,
 )
+from sentiencedb.database_abc import DatabaseABC
 from sentiencedb.dialects import MySQLDialect, PgSQLDialect, SQLiteDialect
 from sentiencedb.exceptions import QueryError
+from sentiencedb.queries.enums import ConditionEnum
 from sentiencedb.queries.objects import Alias, CurrentTimestamp, Expression, ExpressionF, Identifier, Raw, SubQuery
+from sentiencedb.queries.objects.clauses import Condition
+from sentiencedb.queries.objects.query_with_params import QueryWithParams
 from sentiencedb.queries.query import Query
 
 
@@ -93,6 +98,23 @@ class TestExpressionF:
         assert sql.sql(sqlite_dialect) == '"a" IN (SELECT b FROM t WHERE c = ?) AND ?'
         assert sql.params(sqlite_dialect) == [1, "2"]
         assert sql.raw_sql(sqlite_dialect) == "\"a\" IN (SELECT b FROM t WHERE c = 1) AND '2'"
+
+    def test_a_dialect_renders_it_and_its_sub_select_once(self, sqlite_dialect: SQLiteDialect) -> None:
+        compiled: list[str] = []
+
+        class CountingQuery(Query):
+            def to_query_with_params(self) -> QueryWithParams:
+                compiled.append("inner")
+
+                return QueryWithParams("SELECT b FROM t WHERE c = :c", {"c": 1})
+
+        inner = CountingQuery(create_autospec(DatabaseABC, instance=True), sqlite_dialect)
+        query_with_params = sqlite_dialect.select(
+            table="u", where=[Condition(ConditionEnum.RAW, None, expressionf("a IN (%s)", inner))]
+        )
+
+        assert query_with_params == QueryWithParams('SELECT * FROM "u" WHERE (a IN (SELECT b FROM t WHERE c = ?))', [1])
+        assert compiled == ["inner"]
 
     def test_double_percent_is_a_literal_percent(self, sqlite_dialect: SQLiteDialect) -> None:
         sql = expressionf("a LIKE '10%%' AND b = %d%%%d", 1, 2)

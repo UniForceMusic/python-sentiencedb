@@ -10,60 +10,119 @@ from sentiencedb.queries.objects import QueryWithParams
 
 
 class TestNamedParamsToQuestionMarks:
-    def test_positional_query_is_returned_unchanged(self) -> None:
+    def test_positional_query_is_returned_unchanged(self, sqlite_dialect: SQLiteDialect) -> None:
         query_with_params = QueryWithParams("SELECT ? AS a", [1])
 
-        assert query_with_params.named_params_to_question_marks() is query_with_params
+        assert query_with_params.named_params_to_question_marks(sqlite_dialect) is query_with_params
 
-    def test_rewrites_named_params_in_placeholder_order(self) -> None:
-        converted = QueryWithParams("SELECT :b, :a, :b", {"a": 1, "b": 2}).named_params_to_question_marks()
+    def test_rewrites_named_params_in_placeholder_order(self, sqlite_dialect: SQLiteDialect) -> None:
+        converted = QueryWithParams("SELECT :b, :a, :b", {"a": 1, "b": 2}).named_params_to_question_marks(
+            sqlite_dialect
+        )
 
         assert converted == QueryWithParams("SELECT ?, ?, ?", [2, 1, 2])
 
-    def test_accepts_keys_with_colon(self) -> None:
-        converted = QueryWithParams("a = :a", {":a": 1}).named_params_to_question_marks()
+    def test_accepts_keys_with_colon(self, sqlite_dialect: SQLiteDialect) -> None:
+        converted = QueryWithParams("a = :a", {":a": 1}).named_params_to_question_marks(sqlite_dialect)
 
         assert converted == QueryWithParams("a = ?", [1])
 
-    def test_skips_casts_strings_identifiers_and_comments(self) -> None:
-        query = """SELECT x::text, ':no', ":no", `:no`, a -- :no
+    def test_skips_casts_strings_identifiers_and_comments(self, sqlite_dialect: SQLiteDialect) -> None:
+        query = """SELECT x::text, ':no', ":no", `:no`, [:no], a -- :no
             /* :no */ FROM t WHERE b = :yes"""
 
-        converted = QueryWithParams(query, {"yes": 1}).named_params_to_question_marks()
+        converted = QueryWithParams(query, {"yes": 1}).named_params_to_question_marks(sqlite_dialect)
 
         assert converted.query == query.replace(":yes", "?")
         assert converted.params == [1]
 
-    def test_missing_named_param_raises(self) -> None:
+    def test_missing_named_param_raises(self, sqlite_dialect: SQLiteDialect) -> None:
         with pytest.raises(QueryWithParamsError, match="named param :missing does not exist"):
-            QueryWithParams("a = :missing", {"a": 1}).named_params_to_question_marks()
+            QueryWithParams("a = :missing", {"a": 1}).named_params_to_question_marks(sqlite_dialect)
 
-    def test_mixing_placeholder_styles_raises(self) -> None:
+    def test_mixing_placeholder_styles_raises(self, sqlite_dialect: SQLiteDialect) -> None:
         with pytest.raises(QueryWithParamsError, match="cannot mix"):
-            QueryWithParams("a = :a AND b = ?", {"a": 1}).named_params_to_question_marks()
+            QueryWithParams("a = :a AND b = ?", {"a": 1}).named_params_to_question_marks(sqlite_dialect)
 
 
 class TestQuestionMarksToPercentS:
-    def test_converts_placeholders_and_doubles_literal_percent_signs(self) -> None:
+    def test_converts_placeholders_and_doubles_literal_percent_signs(self, pgsql_dialect: PgSQLDialect) -> None:
         converted = QueryWithParams(
             "SELECT '50% ?', 10 % 3 FROM t WHERE a LIKE ? AND b = ?", ["x%", 2]
-        ).question_marks_to_percent_s()
+        ).question_marks_to_percent_s(pgsql_dialect)
 
         assert converted == QueryWithParams("SELECT '50%% ?', 10 %% 3 FROM t WHERE a LIKE %s AND b = %s", ["x%", 2])
 
-    def test_converts_named_params_first(self) -> None:
-        converted = QueryWithParams("a = :a OR b = :a", {"a": 1}).question_marks_to_percent_s()
+    def test_converts_named_params_first(self, pgsql_dialect: PgSQLDialect) -> None:
+        converted = QueryWithParams("a = :a OR b = :a", {"a": 1}).question_marks_to_percent_s(pgsql_dialect)
 
         assert converted == QueryWithParams("a = %s OR b = %s", [1, 1])
 
-    def test_count_mismatch_raises(self) -> None:
+    def test_count_mismatch_raises(self, pgsql_dialect: PgSQLDialect) -> None:
         with pytest.raises(QueryWithParamsError, match="question mark and param count do not match"):
-            QueryWithParams("a = ? AND b = ?", [1]).question_marks_to_percent_s()
+            QueryWithParams("a = ? AND b = ?", [1]).question_marks_to_percent_s(pgsql_dialect)
 
-    def test_question_mark_inside_string_with_escaped_quote_is_not_a_placeholder(self) -> None:
-        converted = QueryWithParams(r"SELECT 'it\'s ?' , ?", [1]).question_marks_to_percent_s()
+    def test_percent_signs_in_dollar_quotes_and_comments_are_doubled(self, pgsql_dialect: PgSQLDialect) -> None:
+        converted = QueryWithParams("SELECT $$5% ?$$ /* 5% ? */, ?", [1]).question_marks_to_percent_s(pgsql_dialect)
 
-        assert converted.query == r"SELECT 'it\'s ?' , %s"
+        assert converted.query == "SELECT $$5%% ?$$ /* 5%% ? */, %s"
+
+
+# Each query has exactly one real placeholder, the last ``?``; every other ``?`` is hidden from the tokenizer.
+HIDDEN_PLACEHOLDERS = {
+    "sqlite": [
+        "SELECT 'C:\\' AS a, 'ok?' AS b, ?",
+        "SELECT 'it''s ?', ?",
+        'SELECT "a?", `b?`, [c?], ?',
+        "SELECT 1 -- ?\n, ?",
+        "SELECT /* ? */ ?",
+    ],
+    "pgsql": [
+        "SELECT 'C:\\' AS a, 'ok?' AS b, ?",
+        "SELECT E'it\\'s ?', e'\\\\', ?",
+        "SELECT $$what?$$, $body$ $$ ? $$ $body$, ?",
+        "SELECT /* outer /* ? */ still ? */ ?",
+        'SELECT "a?", ?',
+        "SELECT a$b$c, x$1, ?",  # identifiers with $, not dollar quotes
+    ],
+    "mysql": [
+        "SELECT 'it\\'s ?', \"also \\\" ?\", ?",
+        "SELECT 1 # what?\n, ?",
+        "SELECT 1 -- what?\n, ?",
+        "SELECT `a?`, /* ? */ ?",
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("engine", "query"), [(engine, query) for engine, queries in HIDDEN_PLACEHOLDERS.items() for query in queries]
+)
+def test_tokenizer_follows_each_engines_lexical_rules(engine: str, query: str, request: pytest.FixtureRequest) -> None:
+    dialect = request.getfixturevalue(f"{engine}_dialect")
+
+    assert QueryWithParams(query, [1]).count_question_marks(dialect) == 1
+    assert QueryWithParams(query, [1]).to_sql(dialect) == query[: query.rindex("?")] + "1"
+
+
+@pytest.mark.parametrize(
+    ("engine", "query", "count"),
+    [
+        ("sqlite", "SELECT 'C:\\', '?'", 0),  # no backslash escapes in standard strings
+        ("pgsql", "SELECT 'C:\\', '?'", 0),
+        ("mysql", "SELECT 'C:\\', '?'", 1),  # \' escapes the quote: the string is 'C:\', ' and ? is outside it
+        ("mysql", "SELECT 1--?", 1),  # 1 - (-?): MySQL needs whitespace after --
+        ("pgsql", "SELECT 1 # ?", 1),  # # is an operator on PostgreSQL
+        ("sqlite", "SELECT /* /* */ ?", 1),  # block comments only nest on PostgreSQL
+        ("pgsql", "SELECT /* /* */ ? */", 0),
+        ("mariadb", "SELECT /* /* */ ?", 1),
+    ],
+)
+def test_tokenizer_differences_between_engines(
+    engine: str, query: str, count: int, request: pytest.FixtureRequest
+) -> None:
+    dialect = request.getfixturevalue(f"{engine}_dialect")
+
+    assert QueryWithParams(query).count_question_marks(dialect) == count
 
 
 class TestToSql:

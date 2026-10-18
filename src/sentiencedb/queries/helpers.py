@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -25,8 +25,8 @@ def current_timestamp(precision: int | None = None) -> CurrentTimestamp:
     return CurrentTimestamp(precision)
 
 
-def expression(sql: str, params: Sequence[Scalar] = ()) -> Expression:
-    """SQL with ``?`` placeholders plus the values to bind."""
+def expression(sql: str, params: Sequence[Scalar] | Mapping[str, Scalar] = ()) -> Expression:
+    """SQL with ``?`` placeholders plus the values to bind, or ``:name`` placeholders and a mapping."""
     return Expression(sql, params)
 
 

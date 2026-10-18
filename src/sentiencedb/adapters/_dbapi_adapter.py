@@ -8,12 +8,11 @@ import warnings
 from abc import abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 from ..exceptions import AdapterError, QueryWithParamsError
-from ..queries.objects.query_with_params import REGEX_PATTERN, QueryWithParams
+from ..queries.objects.query_with_params import QueryWithParams
 from ._thread_local_store import ThreadLocalStore
 from .adapter_abc import AdapterABC
 
@@ -38,8 +37,6 @@ class DBAPIAdapter(AdapterABC, Generic[ConnectionT]):
         instead of running inside it.
     """
 
-    TIMEZONE_AWARE: ClassVar[bool] = False
-    """Whether the engine stores UTC offsets. Elsewhere aware datetimes are converted to naive UTC before binding."""
     DRIVER_HINT: ClassVar[str] = ""
     """How to install the driver package; part of the error raised when it cannot be imported."""
 
@@ -107,15 +104,14 @@ class DBAPIAdapter(AdapterABC, Generic[ConnectionT]):
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
         """The package exception for a driver exception, or ``None`` when ``error`` is not one."""
 
-    def _convert_placeholders(self, query_with_params: QueryWithParams) -> QueryWithParams:
+    def _convert_placeholders(self, dialect: DialectABC, query_with_params: QueryWithParams) -> QueryWithParams:
         """Rewrite the dialect's ``?`` placeholders (or the user's ``:name`` ones) to the driver's paramstyle.
 
         The default keeps ``?`` and validates the parameter count.
         """
-        positional = query_with_params.named_params_to_question_marks()
-        placeholders = sum(match["question_mark"] is not None for match in REGEX_PATTERN.finditer(positional.query))
+        positional = query_with_params.named_params_to_question_marks(dialect)
 
-        if placeholders != len(positional.params):
+        if positional.count_question_marks(dialect) != len(positional.params):
             raise QueryWithParamsError("question mark and param count do not match")
 
         return positional
@@ -143,7 +139,7 @@ class DBAPIAdapter(AdapterABC, Generic[ConnectionT]):
         if emulate_prepare:
             return self.query(normalized.to_sql(dialect))
 
-        converted = self._convert_placeholders(normalized)
+        converted = self._convert_placeholders(dialect, normalized)
         params = [self._cast(dialect, param) for param in converted.params]
 
         return self._run(self._connection(), converted.query, params, lambda: _debug_text(normalized, dialect))
@@ -157,14 +153,11 @@ class DBAPIAdapter(AdapterABC, Generic[ConnectionT]):
         return QueryWithParams(query_with_params.query, [self._normalize(value) for value in params])
 
     def _normalize(self, param: Scalar) -> Scalar:
-        """Enum members become their value; aware datetimes become naive UTC unless the engine stores offsets."""
+        """Enum members become their value."""
         value: object = param
 
         if isinstance(value, Enum):  # not a Scalar to the type checker, but easy to pass by accident
             value = value.value
-
-        if isinstance(value, datetime) and not self.TIMEZONE_AWARE and value.utcoffset() is not None:
-            return value.astimezone(UTC).replace(tzinfo=None)
 
         return cast("Scalar", value)
 

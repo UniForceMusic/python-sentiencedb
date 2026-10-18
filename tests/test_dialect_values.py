@@ -103,6 +103,22 @@ class TestCastToDriver:
         assert pgsql_dialect.cast_to_driver(moment) == "2024-01-02 03:04:05.678900"
         assert pgsql_dialect.cast_to_driver(moment.replace(tzinfo=UTC)) == "2024-01-02 03:04:05.678900+00:00"
 
+    def test_aware_datetimes_are_converted_to_utc_where_no_offset_is_stored(
+        self,
+        sqlite_dialect: SQLiteDialect,
+        mysql_dialect: MySQLDialect,
+        mariadb_dialect: MySQLDialect,
+        pgsql_dialect: PgSQLDialect,
+    ) -> None:
+        """Bound values and ``to_sql()`` literals agree: UTC without offset, except on PostgreSQL."""
+        moment = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=2)))
+
+        assert sqlite_dialect.cast_to_driver(moment) == "2024-01-02 01:04:05"
+        assert sqlite_dialect.cast_to_query(moment) == "'2024-01-02 01:04:05'"
+        assert mysql_dialect.cast_to_query(moment) == "'2024-01-02 01:04:05.000000'"
+        assert mariadb_dialect.cast_to_driver(moment) == "2024-01-02 01:04:05.000000"
+        assert pgsql_dialect.cast_to_query(moment) == "'2024-01-02 03:04:05.000000+02:00'"
+
     def test_dates_are_iso_formatted(self, sqlite_dialect: SQLiteDialect) -> None:
         assert sqlite_dialect.cast_to_driver(date(2024, 1, 2)) == "2024-01-02"
 

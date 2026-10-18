@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar
@@ -532,7 +532,7 @@ class SQLDialect(DialectABC):
         return f"{negation}({self._build_conditions(params, group.conditions)})"
 
     def _build_condition(self, params: list[Scalar], condition: Condition) -> str:
-        kind = condition.condition
+        kind = condition.kind
 
         if not isinstance(kind, ConditionEnum):
             return self._build_condition_operator(params, condition)
@@ -559,9 +559,7 @@ class SQLDialect(DialectABC):
 
     def _build_condition_operator(self, params: list[Scalar], condition: Condition) -> str:
         """``<column> <operator> <value>``; a sequence value renders as ``(?, ?, ..)``."""
-        return (
-            f"{self._build_column_name(condition)} {condition.condition} {self._build_value(params, condition.value)}"
-        )
+        return f"{self._build_column_name(condition)} {condition.kind} {self._build_value(params, condition.value)}"
 
     def _build_condition_equals(self, params: list[Scalar], condition: Condition) -> str:
         column = self._build_column_name(condition)
@@ -576,7 +574,7 @@ class SQLDialect(DialectABC):
 
         value = self._build_value(params, condition.value)
 
-        return f"cast({column} AS {cast_type}) {condition.condition} cast({value} AS {cast_type})"
+        return f"cast({column} AS {cast_type}) {condition.kind} cast({value} AS {cast_type})"
 
     def _cast_type(self, value: ConditionValue) -> str | None:
         """The type both sides of ``where_equals(..., cast=True)`` are cast to; ``None`` compares uncast."""
@@ -601,9 +599,9 @@ class SQLDialect(DialectABC):
                 low = self._build_value(params, minimum)
                 high = self._build_value(params, maximum)
 
-                return f"{column} {condition.condition} {low} AND {high}"
+                return f"{column} {condition.kind} {low} AND {high}"
             case _:
-                raise QueryError(f"{condition.condition} requires a (min, max) pair")
+                raise QueryError(f"{condition.kind} requires a (min, max) pair")
 
     def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:
         """``LIKE`` with backslash escapes in the pattern; case insensitive through ``lower()``."""
@@ -622,17 +620,17 @@ class SQLDialect(DialectABC):
         :raises QueryError: An unterminated ``[`` class, or regex flags the engine cannot express.
         """
         tokens = _glob_tokens(self._pattern(condition))
-        negated = condition.condition is ConditionEnum.NOT_GLOB
+        negated = condition.kind is ConditionEnum.NOT_GLOB
         like = _glob_to_like(tokens)
 
         if like is not None:
             kind = ConditionEnum.NOT_LIKE if negated else ConditionEnum.LIKE
 
-            return self._build_condition_like(params, replace(condition, condition=kind, value=like))
+            return self._build_condition_like(params, replace(condition, kind=kind, value=like))
 
         regex = replace(
             condition,
-            condition=ConditionEnum.NOT_REGEX if negated else ConditionEnum.REGEX,
+            kind=ConditionEnum.NOT_REGEX if negated else ConditionEnum.REGEX,
             value=_glob_to_regex(tokens),
             flags="is" if condition.case_insensitive else "s",
         )
@@ -644,7 +642,7 @@ class SQLDialect(DialectABC):
         value = condition.value
 
         if isinstance(value, Sequence) and not isinstance(value, str | bytes) and not value:
-            return "1 = 1" if condition.condition is ConditionEnum.NOT_IN else "1 = 0"
+            return "1 = 1" if condition.kind is ConditionEnum.NOT_IN else "1 = 0"
 
         return self._build_condition_operator(params, condition)
 
@@ -672,25 +670,25 @@ class SQLDialect(DialectABC):
         if flags:
             pattern = f"(?{flags}){pattern}"
 
-        operator = negated_operator if condition.condition is ConditionEnum.NOT_REGEX else operator
+        operator = negated_operator if condition.kind is ConditionEnum.NOT_REGEX else operator
 
         return f"{self._build_column_name(condition)} {operator} {self._build_value(params, pattern)}"
 
     def _build_column_name(self, condition: Condition) -> str:
         if condition.identifier is None:
-            raise QueryError(f"{condition.condition} condition requires a column")
+            raise QueryError(f"{condition.kind} condition requires a column")
 
         return self.escape_identifier(condition.identifier)
 
     @staticmethod
     def _negation(condition: Condition) -> str:
         """``"NOT "`` for the negated condition kinds, else ``""``."""
-        return "NOT " if condition.condition in _NEGATED_CONDITIONS else ""
+        return "NOT " if condition.kind in _NEGATED_CONDITIONS else ""
 
     @staticmethod
     def _pattern(condition: Condition) -> str:
         if not isinstance(condition.value, str):
-            raise QueryError(f"{condition.condition} requires a string pattern")
+            raise QueryError(f"{condition.kind} requires a string pattern")
 
         return condition.value
 
@@ -703,9 +701,10 @@ class SQLDialect(DialectABC):
             return self._build_sub_query(params, value)
 
         if isinstance(value, Sql):
-            params.extend(value.params(self))
+            fragment = value.to_query_with_params(self)
+            params.extend(fragment.params)
 
-            return value.sql(self)
+            return fragment.query
 
         if isinstance(value, str | bytes):
             params.append(value)
@@ -720,7 +719,7 @@ class SQLDialect(DialectABC):
         return "?"
 
     def _build_sub_query(self, params: list[Scalar], query: Query) -> str:
-        query_with_params = query.to_query_with_params().named_params_to_question_marks()
+        query_with_params = query.to_query_with_params().named_params_to_question_marks(self)
         params.extend(query_with_params.params)
 
         return f"({query_with_params.query})"
@@ -1002,6 +1001,10 @@ class SQLDialect(DialectABC):
         return value if self.boolean else int(value)
 
     def cast_datetime(self, value: datetime) -> str:
+        """:attr:`DATETIME_FORMAT`; an aware datetime is converted to UTC first, as the engine stores no offset."""
+        if value.utcoffset() is not None:
+            value = value.astimezone(UTC)
+
         return value.strftime(self.DATETIME_FORMAT)
 
     def parse_bool(self, value: Scalar) -> bool:

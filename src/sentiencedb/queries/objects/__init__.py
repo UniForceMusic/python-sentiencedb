@@ -21,11 +21,10 @@ from .ddl import (
     Type,
     UniqueConstraint,
 )
-from .query_with_params import REGEX_PATTERN, QueryWithParams
+from .query_with_params import QueryWithParams
 from .sql import CurrentTimestamp, Expression, ExpressionF, Identifier, Raw, Sql
 
 __all__ = [
-    "REGEX_PATTERN",
     "AddColumn",
     "AddForeignKeyConstraint",
     "AddPrimaryKeys",

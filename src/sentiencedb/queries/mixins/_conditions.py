@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, TypeVar
 from ..enums import ChainEnum, ConditionEnum
 from ..helpers import escape_backslash
 from ..objects.clauses import Condition, ConditionGroup
-from ..objects.query_with_params import QueryWithParams
 from ..objects.sql import Expression
 from ..query import Query
 
@@ -60,12 +59,10 @@ def in_values(values: Sequence[Value] | Query) -> tuple[Value, ...] | Query:
 
 
 def raw_condition(sql: str, values: Sequence[Scalar] | Mapping[str, Scalar], chain: ChainEnum) -> Condition:
-    """A raw ``(<sql>)`` condition; ``:name`` placeholders are rewritten to ``?``."""
-    query_with_params = QueryWithParams(sql, values).named_params_to_question_marks()
+    """A raw ``(<sql>)`` condition; the dialect rewrites ``:name`` placeholders to ``?``. ``values`` is copied."""
+    copied = dict(values) if isinstance(values, Mapping) else tuple(values)
 
-    return Condition(
-        ConditionEnum.RAW, None, Expression(query_with_params.query, list(query_with_params.params)), chain
-    )
+    return Condition(ConditionEnum.RAW, None, Expression(sql, copied), chain)
 
 
 def group(

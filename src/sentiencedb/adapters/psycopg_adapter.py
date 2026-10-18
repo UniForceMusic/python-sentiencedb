@@ -36,7 +36,6 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
     ``ssl_root_cert``, ``ssl_crl``, ``client_encoding`` and ``search_path``.
     """
 
-    TIMEZONE_AWARE = True
     DRIVER_HINT = "PostgreSQL support needs psycopg: pip install 'sentiencedb[postgres]'"
 
     def __init__(
@@ -144,8 +143,8 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
     ) -> PsycopgResult:
         return PsycopgResult(connection.execute(query, params))
 
-    def _convert_placeholders(self, query_with_params: QueryWithParams) -> QueryWithParams:
-        return query_with_params.question_marks_to_percent_s()
+    def _convert_placeholders(self, dialect: DialectABC, query_with_params: QueryWithParams) -> QueryWithParams:
+        return query_with_params.question_marks_to_percent_s(dialect)
 
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
         return map_psycopg_error(error, query, connecting=connecting)

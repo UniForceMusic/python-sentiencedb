@@ -7,10 +7,12 @@ from typing import Any
 
 import pytest
 
+from sentiencedb.dialects import SQLiteDialect
 from sentiencedb.exceptions import QueryWithParamsError
 from sentiencedb.queries import HavingGroup, SelectQuery, WhereGroup
 from sentiencedb.queries.enums import ChainEnum, ConditionEnum
 from sentiencedb.queries.objects.clauses import Condition, ConditionGroup, ConditionNode
+from sentiencedb.queries.objects.query_with_params import QueryWithParams
 from sentiencedb.queries.objects.sql import Expression, ExpressionF, Identifier, Raw
 
 SUB_SELECT: Any = object()
@@ -78,9 +80,9 @@ CASES: list[tuple[str, tuple[Any, ...], ConditionNode]] = [
         ("%s > %d", Identifier("a"), 1),
         Condition(ConditionEnum.RAW, None, ExpressionF("%s > %d", (Identifier("a"), 1))),
     ),
-    ("", ("a = ? OR b = ?", [1, 2]), Condition(ConditionEnum.RAW, None, Expression("a = ? OR b = ?", [1, 2]))),
-    ("", ("a = :a OR b = :a", {"a": 1}), Condition(ConditionEnum.RAW, None, Expression("a = ? OR b = ?", [1, 1]))),
-    ("", ("a IS NULL",), Condition(ConditionEnum.RAW, None, Expression("a IS NULL", []))),
+    ("", ("a = ? OR b = ?", [1, 2]), Condition(ConditionEnum.RAW, None, Expression("a = ? OR b = ?", (1, 2)))),
+    ("", ("a = :a OR b = :a", {"a": 1}), Condition(ConditionEnum.RAW, None, Expression("a = :a OR b = :a", {"a": 1}))),
+    ("", ("a IS NULL",), Condition(ConditionEnum.RAW, None, Expression("a IS NULL", ()))),
 ]
 
 
@@ -182,6 +184,14 @@ def test_having_group_callback_receives_a_having_group() -> None:
     assert isinstance(received[0], HavingGroup)
 
 
-def test_raw_condition_rejects_missing_named_params() -> None:
+def test_raw_condition_named_params_are_made_positional_by_the_dialect(sqlite_dialect: SQLiteDialect) -> None:
+    values = {"a": 1}
+    (condition,) = WhereGroup().where("a = :a OR b = :a", values).conditions
+    values["a"] = 2
+
+    assert sqlite_dialect.select(table="t", where=[condition]) == QueryWithParams(
+        'SELECT * FROM "t" WHERE (a = ? OR b = ?)', [1, 1]
+    )
+
     with pytest.raises(QueryWithParamsError):
-        WhereGroup().where("a = :a", {"b": 1})
+        sqlite_dialect.select(table="t", where=WhereGroup().where("a = :a", {"b": 1}).conditions)

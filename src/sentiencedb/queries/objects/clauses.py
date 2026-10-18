@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class Condition:
     """One condition of a ``WHERE``, ``HAVING`` or join ``ON`` clause.
 
-    ``condition`` is a :class:`ConditionEnum`, or a plain ``str`` operator that is emitted verbatim
+    ``kind`` is a :class:`ConditionEnum`, or a plain ``str`` operator that is emitted verbatim
     (``where_operator``). The shape of ``identifier`` and ``value`` depends on the kind:
 
     =============================================  ==========  ============================================
@@ -37,7 +37,7 @@ class Condition:
     =============================================  ==========  ============================================
     """
 
-    condition: ConditionEnum | str
+    kind: ConditionEnum | str
     identifier: IdentifierLike | None
     value: ConditionValue
     chain: ChainEnum = ChainEnum.AND

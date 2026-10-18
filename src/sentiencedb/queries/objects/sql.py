@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
@@ -36,6 +36,10 @@ class Sql(ABC):
     @abstractmethod
     def raw_sql(self, dialect: DialectABC) -> str:
         """The fragment with every parameter interpolated as a literal."""
+
+    def to_query_with_params(self, dialect: DialectABC) -> QueryWithParams:
+        """:meth:`sql` and :meth:`params` together; what dialects use, so a fragment is rendered once."""
+        return QueryWithParams(self.sql(dialect), self.params(dialect))
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,19 +76,23 @@ class Identifier(Sql):
 
 @dataclass(frozen=True, slots=True)
 class Expression(Sql):
-    """SQL with ``?`` placeholders plus the values to bind, e.g. ``expression("coalesce(a, ?)", [0])``."""
+    """SQL with ``?`` placeholders plus the values to bind, e.g. ``expression("coalesce(a, ?)", [0])``, or with
+    ``:name`` placeholders and a mapping (rewritten to ``?`` when rendered)."""
 
     text: str
-    values: Sequence[Scalar] = ()
+    values: Sequence[Scalar] | Mapping[str, Scalar] = ()
 
     def sql(self, dialect: DialectABC) -> str:
-        return self.text
+        return self.to_query_with_params(dialect).query
 
     def params(self, dialect: DialectABC) -> list[Scalar]:
-        return list(self.values)
+        return list(self.to_query_with_params(dialect).params)
 
     def raw_sql(self, dialect: DialectABC) -> str:
         return QueryWithParams(self.text, self.values).to_sql(dialect)
+
+    def to_query_with_params(self, dialect: DialectABC) -> QueryWithParams:
+        return QueryWithParams(self.text, self.values).named_params_to_question_marks(dialect)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,32 +139,28 @@ class ExpressionF(Sql):
     values: Sequence[Value] = ()
 
     def sql(self, dialect: DialectABC) -> str:
-        return self._build(dialect)[0]
+        return self.to_query_with_params(dialect).query
 
     def params(self, dialect: DialectABC) -> list[Scalar]:
-        return self._build(dialect)[1]
+        return list(self.to_query_with_params(dialect).params)
 
     def raw_sql(self, dialect: DialectABC) -> str:
-        return self._build(dialect)[2]
+        return self.to_query_with_params(dialect).to_sql(dialect)
 
-    def _build(self, dialect: DialectABC) -> tuple[str, list[Scalar], str]:
+    def to_query_with_params(self, dialect: DialectABC) -> QueryWithParams:
         sql: list[str] = []
-        raw_sql: list[str] = []
         params: list[Scalar] = []
         position = 0
         index = 0
 
         for match in _FORMAT_PATTERN.finditer(self.format):
-            literal = self.format[position : match.start()]
-            sql.append(literal)
-            raw_sql.append(literal)
+            sql.append(self.format[position : match.start()])
             position = match.end()
 
             modifier = match["modifier"]
 
             if modifier is None:
                 sql.append("%")
-                raw_sql.append("%")
 
                 continue
 
@@ -166,26 +170,21 @@ class ExpressionF(Sql):
             value = self.values[index]
             index += 1
 
-            if isinstance(value, Query):
-                query_with_params = value.to_query_with_params()
-                sql.append(query_with_params.query)
-                raw_sql.append(query_with_params.to_sql(dialect))
-                params.extend(query_with_params.params)
-            elif isinstance(value, Sql):
-                sql.append(value.sql(dialect))
-                raw_sql.append(value.raw_sql(dialect))
-                params.extend(value.params(dialect))
+            if isinstance(value, Query | Sql):
+                fragment = (
+                    value.to_query_with_params().named_params_to_question_marks(dialect)
+                    if isinstance(value, Query)
+                    else value.to_query_with_params(dialect)
+                )
+                sql.append(fragment.query)
+                params.extend(fragment.params)
             else:
-                param = _cast(value, modifier, match["precision"])
                 sql.append("?")
-                raw_sql.append(dialect.cast_to_query(param))
-                params.append(param)
+                params.append(_cast(value, modifier, match["precision"]))
 
-        literal = self.format[position:]
-        sql.append(literal)
-        raw_sql.append(literal)
+        sql.append(self.format[position:])
 
-        return "".join(sql), params, "".join(raw_sql)
+        return QueryWithParams("".join(sql), params)
 
 
 def _cast(value: Scalar, modifier: str, precision: str | None) -> Scalar:
