@@ -67,7 +67,7 @@ class SQLiteDialect(SQLDialect):
         """SQLite rejects parenthesised compound members, so each member is wrapped as ``SELECT * FROM (<select>)``,
         which also keeps a member's own ``ORDER BY`` / ``LIMIT``."""
         return f"SELECT * FROM ({query})" + "".join(
-            f" {union.union} SELECT * FROM {self._build_sub_query(params, union.select_query)}" for union in unions
+            f" {union.kind} SELECT * FROM {self._build_sub_query(params, union.select_query)}" for union in unions
         )
 
     def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:

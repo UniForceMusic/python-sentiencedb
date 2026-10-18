@@ -110,7 +110,7 @@ class WhereMixin:
         return self.or_where_not_like(column, f"%{_conditions.escape_like(value)}%", case_insensitive)
 
     def where_glob(self, column: IdentifierLike, value: str, case_insensitive: bool = False) -> Self:
-        """``column GLOB value`` (``*`` and ``?`` wildcards; converted to ``LIKE`` where unsupported)."""
+        """``column GLOB value`` (``*``, ``?``, ``[..]``); emulated with ``LIKE`` or a regex where unsupported."""
         return self._add_where(Condition(ConditionEnum.GLOB, column, value, case_insensitive=case_insensitive))
 
     def or_where_glob(self, column: IdentifierLike, value: str, case_insensitive: bool = False) -> Self:

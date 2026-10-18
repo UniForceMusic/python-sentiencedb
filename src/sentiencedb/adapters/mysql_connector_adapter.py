@@ -35,7 +35,7 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     Connections run in autocommit mode; transactions are explicit ``START TRANSACTION`` statements. Statements with
     parameters run as server side prepared statements, which understand the dialect's ``?`` placeholders natively.
     Results are read completely before the statement returns, so the connection is immediately free for the next
-    one. MySQL and MariaDB store no UTC offset, so aware datetimes are bound in UTC.
+    one. MySQL and MariaDB store no UTC offset, so the dialect binds aware datetimes in UTC.
 
     The C extension binds a ``float`` parameter as a single precision ``FLOAT`` (``9.95`` arrives as
     ``9.949999809265137``), so finite floats are bound losslessly instead: as a ``DECIMAL`` from their shortest

@@ -240,7 +240,7 @@ class DialectABC(ABC):
 
     @abstractmethod
     def cast_datetime(self, value: datetime) -> str:
-        """A datetime in the dialect's literal format."""
+        """A datetime in the dialect's literal format; an aware one in UTC where the engine stores no offset."""
 
     @abstractmethod
     def parse_bool(self, value: Scalar) -> bool:

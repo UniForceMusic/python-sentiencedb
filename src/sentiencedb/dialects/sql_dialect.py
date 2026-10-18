@@ -468,15 +468,15 @@ class SQLDialect(DialectABC):
         if isinstance(join, Sql):
             return self._build_value(params, join)
 
-        if join.join.lateral and not self.lateral:
+        if join.kind.lateral and not self.lateral:
             raise QueryError("LATERAL is not supported")
 
-        sql = f"{join.join} {self._build_reference(params, join.table)}"
+        sql = f"{join.kind} {self._build_reference(params, join.table)}"
 
         if join.conditions:
             return f"{sql} ON {self._build_conditions(params, join.conditions)}"
 
-        if join.join in (JoinEnum.CROSS_JOIN, JoinEnum.CROSS_JOIN_LATERAL):
+        if join.kind in (JoinEnum.CROSS_JOIN, JoinEnum.CROSS_JOIN_LATERAL):
             return sql
 
         return f"{sql} ON {self.cast_to_query(True)}"
@@ -484,7 +484,7 @@ class SQLDialect(DialectABC):
     def _build_unions(self, params: list[Scalar], query: str, unions: Sequence[UnionClause]) -> str:
         """``(<select>) UNION (<select>) ..``."""
         return f"({query})" + "".join(
-            f" {union.union} {self._build_sub_query(params, union.select_query)}" for union in unions
+            f" {union.kind} {self._build_sub_query(params, union.select_query)}" for union in unions
         )
 
     def _build_group_by(self, group_by: Sequence[IdentifierLike]) -> str:

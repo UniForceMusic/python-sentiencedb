@@ -60,13 +60,13 @@ ConditionNode: TypeAlias = Condition | ConditionGroup
 
 @dataclass(frozen=True, slots=True)
 class JoinClause:
-    """``<join> <table> [ON <conditions>]``.
+    """``<kind> <table> [ON <conditions>]``.
 
     Without conditions ``LEFT``/``INNER`` joins render ``ON TRUE`` (as the dialect spells true);
     ``CROSS`` joins render no ``ON`` clause at all.
     """
 
-    join: JoinEnum
+    kind: JoinEnum
     table: TableRef
     conditions: Sequence[ConditionNode] = ()
 
@@ -96,7 +96,7 @@ class OrderBy:
 class UnionClause:
     """``UNION [ALL] (<select>)``."""
 
-    union: UnionEnum
+    kind: UnionEnum
     select_query: Query
 
 

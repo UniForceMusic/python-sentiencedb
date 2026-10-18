@@ -171,6 +171,20 @@ def is_mysql(db: Database) -> bool:
     return db.dialect.driver in (Driver.MYSQL, Driver.MARIADB)
 
 
+class TestRawSql:
+    @pytest.mark.parametrize("emulate_prepare", [False, True])
+    def test_placeholders_hidden_by_the_engines_lexical_rules(self, db: Database, emulate_prepare: bool) -> None:
+        """Only the last ``?`` of each statement is a placeholder."""
+        if db.dialect.driver is Driver.PGSQL:
+            sql = r"SELECT E'it\'s ?' AS a, 'C:\' AS c, $t$ $$ ? $$ $t$ AS d, ? AS b /* /* ? */ ? */ -- ?"
+            expected = {"a": "it's ?", "c": "C:\\", "d": " $$ ? $$ ", "b": 1}
+        else:
+            sql = "SELECT 'it\\'s ?' AS a, \"x\\\" ?\" AS c, `d?`.`d` AS d, ? AS b FROM (SELECT 0 AS d) AS `d?` # ?"
+            expected = {"a": "it's ?", "c": 'x" ?', "d": 0, "b": 1}
+
+        assert db.prepared(sql, [1], emulate_prepare).fetch_dict() == expected
+
+
 class TestCrud:
     def test_create_insert_select(self, db: Database) -> None:
         row = db.select("users").where_equals("id", 1).execute().fetch_dict()
