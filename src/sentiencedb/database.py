@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Self, TypeVar
 
 from .database_abc import DatabaseABC
 from .driver import Driver
+from .exceptions import AdapterError
 from .queries.alter_table_query import AlterTableQuery
 from .queries.create_index_query import CreateIndexQuery
 from .queries.create_table_query import CreateTableQuery
@@ -36,11 +38,12 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-class _Savepoints(threading.local):
-    """The calling thread's stack of open savepoint names."""
+class _ThreadState(threading.local):
+    """The calling thread's stack of open savepoint names and :meth:`Database.connection` nesting depth."""
 
     def __init__(self) -> None:
-        self.names: list[str] = []
+        self.savepoints: list[str] = []
+        self.connection_depth = 0
 
 
 class Database(DatabaseABC):
@@ -58,7 +61,7 @@ class Database(DatabaseABC):
         self._adapter = adapter
         self._dialect = dialect
         self._schema = schema
-        self._savepoints = _Savepoints()
+        self._thread = _ThreadState()
 
     @classmethod
     def connect(
@@ -183,42 +186,60 @@ class Database(DatabaseABC):
     # -- transactions -------------------------------------------------------------------------------------------
 
     def begin_transaction(self, name: str | None = None) -> None:
-        savepoints = self._savepoints.names
+        savepoints = self._thread.savepoints
 
         if not self._adapter.in_transaction():
             savepoints.clear()
             self._adapter.begin_transaction(self._dialect)
             return
 
+        if not self._dialect.savepoints:
+            raise AdapterError("cannot nest transactions: the dialect has no savepoints")
+
         savepoint = name or f"savepoint_{len(savepoints) + 1}"
-        savepoints.append(savepoint)
         self._adapter.begin_savepoint(self._dialect, savepoint)
+        savepoints.append(savepoint)
 
     def commit_transaction(self, release_savepoints: bool = False, name: str | None = None) -> None:
         if not self._adapter.in_transaction():
             return
 
-        savepoints = self._savepoints.names
+        savepoints = self._thread.savepoints
 
         if release_savepoints or not savepoints:
             savepoints.clear()
             self._adapter.commit_transaction(self._dialect)
             return
 
-        self._adapter.commit_savepoint(self._dialect, savepoints.pop())
+        self._adapter.commit_savepoint(self._dialect, self._pop_savepoint(name))
 
     def rollback_transaction(self, release_savepoints: bool = False, name: str | None = None) -> None:
         if not self._adapter.in_transaction():
             return
 
-        savepoints = self._savepoints.names
+        savepoints = self._thread.savepoints
 
         if release_savepoints or not savepoints:
             savepoints.clear()
             self._adapter.rollback_transaction(self._dialect)
             return
 
-        self._adapter.rollback_savepoint(self._dialect, savepoints.pop())
+        self._adapter.rollback_savepoint(self._dialect, self._pop_savepoint(name))
+
+    def _pop_savepoint(self, name: str | None) -> str:
+        """Remove the savepoint ``name`` (default the innermost) and every later one from the stack."""
+        savepoints = self._thread.savepoints
+
+        if name is None:
+            return savepoints.pop()
+
+        if name not in savepoints:
+            raise AdapterError(f"no open savepoint named {name!r}")
+
+        index = len(savepoints) - 1 - savepoints[::-1].index(name)
+        del savepoints[index:]
+
+        return name
 
     def in_transaction(self) -> bool:
         return self._adapter.in_transaction()
@@ -229,17 +250,62 @@ class Database(DatabaseABC):
         release_savepoints: bool = False,
         name: str | None = None,
     ) -> T:
+        outer = not self._adapter.in_transaction()
         self.begin_transaction(name)
+        # The level this call owns: the whole transaction, or the savepoint it just pushed.
+        level = 0 if outer else len(self._thread.savepoints) - 1
 
         try:
             result = callback(self)
-        except BaseException:
-            self.rollback_transaction(release_savepoints)
+        except BaseException as error:
+            self._abandon(outer, level, release_savepoints, error)
             raise
 
-        self.commit_transaction(release_savepoints)
+        try:
+            self._end(outer, level, release_savepoints, commit=True)
+        except BaseException as error:
+            self._abandon(outer, level, release_savepoints, error)
+            raise
 
         return result
+
+    def _end(self, outer: bool, level: int, release_savepoints: bool, *, commit: bool) -> None:
+        """Commit or roll back the level a :meth:`transaction` call opened, whatever the callback left open."""
+        savepoints = self._thread.savepoints
+
+        if not self._adapter.in_transaction():
+            savepoints.clear()  # the callback (or the server) ended the transaction
+            return
+
+        if outer or release_savepoints:
+            savepoints.clear()
+
+            if commit:
+                self._adapter.commit_transaction(self._dialect)
+            else:
+                self._adapter.rollback_transaction(self._dialect)
+
+            return
+
+        if len(savepoints) <= level:
+            return  # the callback already ended this savepoint
+
+        savepoint = savepoints[level]
+
+        if commit:
+            # A failed release leaves the savepoint on the stack, so _abandon can roll back to it.
+            self._adapter.commit_savepoint(self._dialect, savepoint)
+            del savepoints[level:]
+        else:
+            del savepoints[level:]
+            self._adapter.rollback_savepoint(self._dialect, savepoint)
+
+    def _abandon(self, outer: bool, level: int, release_savepoints: bool, error: BaseException) -> None:
+        """Roll back after ``error`` without letting a failing rollback replace it."""
+        try:
+            self._end(outer, level, release_savepoints, commit=False)
+        except Exception as rollback_error:
+            error.add_note(f"rolling back the transaction failed as well: {rollback_error!r}")
 
     def last_insert_id(self, name: str | None = None) -> int | str | None:
         return self._adapter.last_insert_id(name)
@@ -305,7 +371,23 @@ class Database(DatabaseABC):
     def information_schema_indexes(self, table: str) -> list[Index]:
         return self._schema.indexes(self, self._dialect, table)
 
-    # -- lifecycle ----------------------------------------------------------------------------------------------
+    # -- connections --------------------------------------------------------------------------------------------
+
+    def release_connection(self) -> None:
+        self._adapter.release_connection()
+
+    @contextmanager
+    def connection(self) -> Iterator[Self]:
+        state = self._thread
+        state.connection_depth += 1
+
+        try:
+            yield self
+        finally:
+            state.connection_depth -= 1
+
+            if state.connection_depth == 0:
+                self._adapter.release_connection(if_idle=True)
 
     def close(self) -> None:
         self._adapter.close()

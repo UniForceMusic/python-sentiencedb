@@ -32,8 +32,15 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     Connections run in autocommit mode; transactions are explicit ``START TRANSACTION`` statements. Statements with
     parameters run as server side prepared statements, which understand the dialect's ``?`` placeholders natively.
     Results are read completely before the statement returns, so the connection is immediately free for the next
-    one. Options: ``charset``, ``collation`` and ``engine``.
+    one. MySQL and MariaDB store no UTC offset, so aware datetimes are bound in UTC.
+
+    The C extension decodes a bound ``bytes`` parameter that is selected back directly (``SELECT ?``) as text; values
+    read from ``BLOB``/``BINARY`` columns, and emulated prepares, are unaffected.
+
+    Options: ``charset``, ``collation`` and ``engine``.
     """
+
+    DRIVER_HINT = "MySQL and MariaDB support needs mysql-connector-python: pip install 'sentiencedb[mysql]'"
 
     def __init__(
         self,
@@ -49,13 +56,8 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
 
         super().__init__(driver, name, socket, queries, options, debug)
 
-    def version(self) -> str:
-        return self._connection().server_info or ""
-
-    def in_transaction(self) -> bool:
-        return bool(self._connection().in_transaction)
-
     def last_insert_id(self, name: str | None = None) -> int | str | None:
+        """``LAST_INSERT_ID()``; ``None`` instead of ``0`` when the connection has not generated an id yet."""
         import mysql.connector
 
         try:
@@ -63,17 +65,24 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
         except mysql.connector.Error:
             return None
 
-        return value
+        return value or None
+
+    def _server_version(self, connection: MySQLConnectionAbstract) -> str:
+        return connection.server_info or ""
+
+    def _connection_in_transaction(self, connection: MySQLConnectionAbstract) -> bool:
+        return bool(connection.in_transaction)
 
     def _connect(self) -> MySQLConnectionAbstract:
         import mysql.connector
 
         options = self._options
         socket = self._socket
+        assert socket is not None  # checked by __init__
         parameters: dict[str, str | int | None] = {
             "database": self._name,
-            "user": socket.username if socket else None,
-            "password": socket.password if socket else None,
+            "user": socket.username,
+            "password": socket.password,
             "charset": options.get("charset"),
             "collation": options.get("collation"),
         }
@@ -143,11 +152,6 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
             cursor.close()
 
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
-        import mysql.connector
-
-        if not isinstance(error, mysql.connector.Error):
-            return None
-
         return map_mysql_connector_error(error, query, connecting=connecting)
 
 

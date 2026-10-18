@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentiencedb"
-version = "2.0.0"
-description = "A Python database abstraction layer (Sentiencedb) supporting PostgreSQL, SQLite, MySQL and MariaDB."
+dynamic = ["version"]
+description = "A Python database abstraction layer supporting PostgreSQL, SQLite, MySQL and MariaDB."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["database", "abstraction", "sql", "query-builder", "postgresql", "sqlite", "mysql", "mariadb"]
 
 authors = [
@@ -18,7 +19,6 @@ authors = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -30,6 +30,10 @@ classifiers = [
 ]
 
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/UniForceMusic/python-sentiencedb"
+Changelog = "https://github.com/UniForceMusic/python-sentiencedb/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 postgres = [
@@ -43,6 +47,9 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "sentiencedb.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -255,7 +255,9 @@ quoted separately: `["users", "id"]` becomes `"users"."id"`. A dotted string is 
 `"users.id"`, a single (probably non-existent) column. Any `Sql` object (see below) is emitted as is.
 
 **Values.** `None`, `bool`, `int`, `float`, `Decimal`, `str`, `bytes`, `date` and `datetime` are bound as
-parameters (booleans and datetimes converted to what the dialect stores). A `Sql` object is inlined together with its
+parameters (booleans and datetimes converted to what the dialect stores). Timezone-aware datetimes keep their offset
+on PostgreSQL; MySQL, MariaDB and SQLite have no time zone type, so they are converted to UTC first and stored without
+offset (naive datetimes are stored as they are). SQLite stores datetimes at second precision. A `Sql` object is inlined together with its
 own parameters, and a `SelectQuery` becomes a parenthesised sub-select. Where a `Sql` object stands in an
 identifier position (a column, a table, `GROUP BY`, a default) its parameters are interpolated as literals instead.
 
@@ -932,19 +934,26 @@ copy.execute()
 
 A `Database` can be shared between threads; query builders and results cannot.
 
-- **One connection per thread.** The thread that calls `connect()` connects immediately; every other thread opens its
-  own connection the first time it runs a statement. Startup `queries` and the adapter's session setup run on each
-  new connection. A connection is closed when its thread exits, and `db.close()` closes them all; using the database
-  afterwards raises `AdapterError`.
-- **Connection cap.** `max_connections` limits open connections. Because a connection lives as long as its thread,
-  the cap must cover every live thread that uses the database (thread pool workers included); a thread that cannot
-  get a slot within `acquire_timeout` seconds raises `ConnectionLimitError`.
+- **One connection per thread.** Every thread opens its own connection the first time it runs a statement and keeps
+  it until the thread exits, it releases it, or `db.close()` closes them all (using the database afterwards raises
+  `AdapterError`). Startup `queries` and the adapter's session setup run on each new connection. `connect()`
+  connects immediately to validate the configuration; with `max_connections` set it releases that connection right
+  away, so the connecting thread does not hold a slot.
+- **Releasing a connection.** `db.release_connection()` closes the calling thread's connection and frees its slot;
+  the thread's next statement opens a new one. It raises `AdapterError` inside a transaction. `with db.connection():`
+  releases the connection when the block ends, unless a transaction is still open; nested blocks release on the
+  outermost exit. Session state (temporary tables, `SET`, `last_insert_id()`) does not survive a release.
+- **Connection cap.** `max_connections` limits open connections; a thread that cannot get a slot within
+  `acquire_timeout` seconds (forever when absent) raises `ConnectionLimitError`. A thread holds its slot for as long
+  as it keeps its connection, so wrap thread pool tasks in `with db.connection():`. Otherwise every live worker
+  holds a slot, and the cap must cover all of them.
 - **Transactions are per thread**, like the connection they run on; so is the savepoint stack.
 - **SQLite in-memory databases** (`":memory:"`, `""`, `file:` URIs with `mode=memory`) exist per connection, so all
-  threads share one connection and run one statement at a time. Their transaction state is shared too: a transaction
-  begun in one thread includes the statements of the other threads.
-- **Results** read from the thread's connection; consume them in that thread or snapshot them with
-  `Result.from_result()`.
+  threads share one connection that is never released, and they run one statement at a time. A transaction holds
+  that connection for its thread from `BEGIN` until it ends, so the other threads wait instead of running inside it.
+  `in_transaction()` is only `True` in the thread that began the transaction.
+- **Results** are read completely when the statement runs, so they hold no connection or lock. Consume them in the
+  thread that ran them, or snapshot them with `Result.from_result()` to hand them to another thread.
 
 ```python
 import os
@@ -952,12 +961,13 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 path = os.path.join(tempfile.mkdtemp(), "app.db")
-shared = Database.connect_sqlite(path, options={"journal_mode": "WAL", "max_connections": 5, "acquire_timeout": 10})
+shared = Database.connect_sqlite(path, options={"journal_mode": "WAL", "max_connections": 2, "acquire_timeout": 10})
 shared.create_table("hits").identity("id").integer("worker").execute()
 
 
 def work(worker: int) -> None:
-    shared.insert("hits").values({"worker": worker}).execute()
+    with shared.connection():  # gives the slot back when the task is done
+        shared.insert("hits").values({"worker": worker}).execute()
 
 
 with ThreadPoolExecutor(max_workers=4) as pool:

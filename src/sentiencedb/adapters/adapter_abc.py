@@ -20,18 +20,22 @@ class AdapterABC(ABC):
 
     Contract shared by every adapter:
 
-    * **Connections are per thread.** Each thread lazily opens its own driver connection; the constructing thread
-      connects eagerly so configuration errors surface in :meth:`Database.connect`. ``max_connections`` caps the
-      number of open connections and ``acquire_timeout`` bounds the wait for a free slot. Connections of finished
-      threads are closed. :meth:`close` closes all of them.
+    * **Connections are per thread.** Each thread lazily opens its own driver connection and keeps it until the
+      thread exits or calls :meth:`release_connection`. The constructor connects eagerly so configuration errors
+      surface in :meth:`Database.connect`; with ``max_connections`` that first connection is released right away so
+      it does not hold a slot. ``max_connections`` caps the number of open connections and ``acquire_timeout``
+      bounds the wait for a free slot. :meth:`close` closes all of them.
     * **Autocommit.** Every statement commits immediately unless a transaction was started with
       :meth:`begin_transaction`, which runs the dialect's ``BEGIN`` statement.
     * **Placeholders.** :meth:`query_with_params` receives ``?`` placeholders and converts them to the driver's
-      paramstyle; every parameter goes through :meth:`DialectABC.cast_to_driver` first.
+      paramstyle; every parameter goes through :meth:`DialectABC.cast_to_driver` first. Before that, ``Enum``
+      members are replaced by their value and, on engines without a time zone type (MySQL, MariaDB, SQLite),
+      timezone-aware datetimes are converted to UTC and bound without offset. Naive datetimes are bound as they are.
     * **Errors.** Driver exceptions are re-raised as :class:`~sentiencedb.exceptions.DriverError` subclasses with
       the original as ``__cause__``.
     * **Debugging.** When a ``debug`` callback is set it is called after every statement with the interpolated SQL,
-      the start time and the error message (or ``None``).
+      the start time and the error message (or ``None``). It never raises: values that have no SQL literal are
+      shown as ``query -- params: [...]``, and an exception raised by the callback becomes a ``RuntimeWarning``.
 
     :param driver: Which engine (MySQL and MariaDB share an adapter).
     :param name: Database name, or the file path / ``":memory:"`` for SQLite.
@@ -39,7 +43,8 @@ class AdapterABC(ABC):
     :param queries: Statements run on every new connection, after the adapter's own setup.
     :param options: Connection options.
     :param debug: Statement callback.
-    :raises AdapterError: Invalid configuration (e.g. a server driver without a socket).
+    :raises AdapterError: Invalid configuration (e.g. a server driver without a socket), or the driver package is
+        not installed.
     :raises ConnectionFailedError: The initial connection could not be opened.
     """
 
@@ -91,7 +96,7 @@ class AdapterABC(ABC):
 
     @abstractmethod
     def begin_savepoint(self, dialect: DialectABC, name: str) -> None:
-        """``SAVEPOINT name``; no-op outside a transaction or when the dialect has no savepoints."""
+        """``SAVEPOINT name``; no-op outside a transaction."""
 
     @abstractmethod
     def commit_savepoint(self, dialect: DialectABC, name: str) -> None:
@@ -111,6 +116,15 @@ class AdapterABC(ABC):
 
         :param name: PostgreSQL sequence name (``currval``); without it ``lastval()`` is used. Ignored elsewhere.
         :returns: An ``int`` when numeric, ``None`` when unavailable.
+        """
+
+    @abstractmethod
+    def release_connection(self, *, if_idle: bool = False) -> None:
+        """Close the calling thread's connection and free its ``max_connections`` slot; the thread's next statement
+        opens a new one. No-op when the thread has no connection, and for a shared connection (SQLite in-memory).
+
+        :param if_idle: Keep a connection that is inside a transaction instead of raising.
+        :raises AdapterError: The connection is inside a transaction.
         """
 
     @abstractmethod

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from types import TracebackType
 from typing import TYPE_CHECKING, Self, TypeVar
 
@@ -66,19 +67,29 @@ class DatabaseABC(ABC):
 
     @abstractmethod
     def begin_transaction(self, name: str | None = None) -> None:
-        """Begin a transaction, or -- when one is active -- a savepoint named ``name`` (default ``savepoint_<n>``)."""
+        """Begin a transaction, or -- when one is active -- a savepoint named ``name`` (default ``savepoint_<n>``).
+
+        :raises AdapterError: A transaction is active and the dialect has no savepoints.
+        """
 
     @abstractmethod
     def commit_transaction(self, release_savepoints: bool = False, name: str | None = None) -> None:
-        """Release the innermost savepoint, or commit when there is none (or ``release_savepoints``).
+        """Release the savepoint ``name`` (default the innermost one) together with the savepoints opened after it,
+        or commit when there is no savepoint (or ``release_savepoints``). No-op outside a transaction.
 
-        No-op outside a transaction. ``name`` is accepted for API parity and unused.
+        :raises AdapterError: There is no open savepoint ``name``.
+        :raises OperationalError: PostgreSQL: the transaction was aborted by an earlier error; it has been rolled
+            back (to the savepoint) instead.
         """
 
     @abstractmethod
     def rollback_transaction(self, release_savepoints: bool = False, name: str | None = None) -> None:
-        """Roll back to the innermost savepoint, or roll back the transaction when there is none (or
-        ``release_savepoints``). No-op outside a transaction. ``name`` is accepted for API parity and unused."""
+        """Roll back to the savepoint ``name`` (default the innermost one), dropping it and the savepoints opened
+        after it from the stack, or roll back the transaction when there is no savepoint (or
+        ``release_savepoints``). No-op outside a transaction.
+
+        :raises AdapterError: There is no open savepoint ``name``.
+        """
 
     @abstractmethod
     def in_transaction(self) -> bool:
@@ -92,7 +103,13 @@ class DatabaseABC(ABC):
         name: str | None = None,
     ) -> T:
         """Run ``callback(self)`` inside :meth:`begin_transaction`; commit on return, roll back and re-raise on any
-        exception. Nested calls use savepoints."""
+        exception. Nested calls use savepoints.
+
+        Each call ends exactly the level it opened -- the transaction, or its own savepoint -- including savepoints
+        the callback left open, so the thread's connection is left as the call found it. When the commit fails the
+        level is rolled back and the commit error raised. A rollback that fails as well never replaces the original
+        exception; it is added to it as a note.
+        """
 
     @abstractmethod
     def last_insert_id(self, name: str | None = None) -> int | str | None:
@@ -162,6 +179,22 @@ class DatabaseABC(ABC):
 
     @abstractmethod
     def information_schema_indexes(self, table: str) -> list[Index]: ...
+
+    # -- connections --------------------------------------------------------------------------------------------
+
+    @abstractmethod
+    def release_connection(self) -> None:
+        """Close the calling thread's connection and free its ``max_connections`` slot; the thread's next statement
+        opens a new one. No-op without a connection, and for a SQLite in-memory database (its connection is shared).
+
+        :raises AdapterError: The thread is inside a transaction.
+        """
+
+    @abstractmethod
+    def connection(self) -> AbstractContextManager[Self]:
+        """``with db.connection():`` -- use the calling thread's connection for the block, then release it (see
+        :meth:`release_connection`) unless a transaction is still open. Nested blocks release on the outermost
+        exit. Wrap the body of thread pool tasks in it so idle workers do not hold ``max_connections`` slots."""
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 

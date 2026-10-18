@@ -34,8 +34,11 @@ class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
 
     In-memory databases (``":memory:"``, ``""``, ``file:`` URIs with ``mode=memory``) exist per connection, so
     instead of one connection per thread they use a single connection that every thread shares, one statement at
-    a time. Its transaction state is shared too: a transaction begun by one thread includes the other threads'
-    statements.
+    a time. A transaction holds that connection for its thread until it ends: the other threads' statements wait
+    for it rather than run inside it.
+
+    Rows are read completely when the statement runs, so an unread result never holds a lock on the database file.
+    Datetime parameters are stored as text at second precision (``%Y-%m-%d %H:%M:%S``), aware ones in UTC.
 
     The socket is ignored. Options: ``read_only``, ``encryption_key`` (SQLCipher builds), ``busy_timeout``,
     ``encoding``, ``journal_mode``, ``foreign_keys``, ``deprecated_case_sensitive_like``, ``create_functions`` and
@@ -53,13 +56,8 @@ class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
     ) -> None:
         super().__init__(driver, name, socket, queries, options, debug, shared=_is_in_memory(name))
 
-    def version(self) -> str:
-        return sqlite3.sqlite_version
-
-    def in_transaction(self) -> bool:
-        return self._connection().in_transaction
-
     def last_insert_id(self, name: str | None = None) -> int | str | None:
+        """``last_insert_rowid()``; ``None`` instead of ``0`` when the connection has not inserted a row yet."""
         connection = self._connection()
 
         with self._lock:
@@ -68,7 +66,13 @@ class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
             except sqlite3.Error:
                 return None
 
-        return value
+        return value or None
+
+    def _server_version(self, connection: sqlite3.Connection) -> str:
+        return sqlite3.sqlite_version
+
+    def _connection_in_transaction(self, connection: sqlite3.Connection) -> bool:
+        return connection.in_transaction
 
     def _connect(self) -> sqlite3.Connection:
         options = self._options
@@ -134,7 +138,10 @@ class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
     def _execute(self, connection: sqlite3.Connection, query: str, params: Sequence[Scalar] | None) -> SQLite3Result:
         cursor = connection.execute(query) if params is None else connection.execute(query, params)
 
-        return SQLite3Result(cursor)
+        try:
+            return SQLite3Result(cursor)
+        finally:
+            cursor.close()
 
     def _cast(self, dialect: DialectABC, value: Scalar) -> Scalar:
         """Decimals are bound as text: ``sqlite3`` cannot bind them, and text keeps them exact."""
@@ -143,9 +150,6 @@ class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
         return str(value) if isinstance(value, Decimal) else value
 
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
-        if not isinstance(error, sqlite3.Error):
-            return None
-
         return map_sqlite3_error(error, query, connecting=connecting)
 
 

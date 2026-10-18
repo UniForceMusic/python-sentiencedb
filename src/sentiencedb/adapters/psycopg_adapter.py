@@ -6,7 +6,7 @@ import contextlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from ..exceptions import AdapterError
+from ..exceptions import AdapterError, OperationalError
 from ..results.psycopg_result import PsycopgResult
 from ..sockets.network_socket import NetworkSocket
 from ..sockets.unix_socket import UnixSocket
@@ -16,6 +16,7 @@ from ._errors import map_psycopg_error
 if TYPE_CHECKING:
     from psycopg import Connection
 
+    from ..dialects.dialect_abc import DialectABC
     from ..driver import Driver
     from ..exceptions import DriverError
     from ..options import DebugCallback, Options
@@ -27,10 +28,16 @@ if TYPE_CHECKING:
 class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
     """PostgreSQL adapter on psycopg 3.
 
-    Connections run in autocommit mode; transactions are explicit ``BEGIN`` statements. A :class:`UnixSocket` path
-    is the socket *directory*. Options: ``ssl_mode``, ``ssl_cert``, ``ssl_key``, ``ssl_root_cert``, ``ssl_crl``,
-    ``client_encoding`` and ``search_path``.
+    Connections run in autocommit mode; transactions are explicit ``BEGIN`` statements. After an error PostgreSQL
+    aborts the transaction, and a ``COMMIT`` would silently roll it back: committing an aborted transaction (or
+    releasing a savepoint inside one) therefore rolls it back and raises :class:`OperationalError` instead.
+
+    A :class:`UnixSocket` path is the socket *directory*. Options: ``ssl_mode``, ``ssl_cert``, ``ssl_key``,
+    ``ssl_root_cert``, ``ssl_crl``, ``client_encoding`` and ``search_path``.
     """
+
+    TIMEZONE_AWARE = True
+    DRIVER_HINT = "PostgreSQL support needs psycopg: pip install 'sentiencedb[postgres]'"
 
     def __init__(
         self,
@@ -46,15 +53,37 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
 
         super().__init__(driver, name, socket, queries, options, debug)
 
-    def version(self) -> str:
-        return self._connection().info.parameter_status("server_version") or ""
+    def commit_transaction(self, dialect: DialectABC) -> None:
+        if self._aborted():
+            self.rollback_transaction(dialect)
+            raise OperationalError(
+                "the transaction was aborted by an earlier error and has been rolled back", sqlstate="25P02"
+            )
 
-    def in_transaction(self) -> bool:
+        super().commit_transaction(dialect)
+
+    def commit_savepoint(self, dialect: DialectABC, name: str) -> None:
+        if self._aborted():
+            self.rollback_savepoint(dialect, name)
+            raise OperationalError(
+                f"the transaction was aborted by an earlier error and has been rolled back to savepoint {name}",
+                sqlstate="25P02",
+            )
+
+        super().commit_savepoint(dialect, name)
+
+    def _aborted(self) -> bool:
         from psycopg.pq import TransactionStatus
 
-        status = self._connection().info.transaction_status
+        return self._connection().info.transaction_status == TransactionStatus.INERROR
 
-        return status in (TransactionStatus.INTRANS, TransactionStatus.INERROR)
+    def _server_version(self, connection: Connection[tuple[Any, ...]]) -> str:
+        return connection.info.parameter_status("server_version") or ""
+
+    def _connection_in_transaction(self, connection: Connection[tuple[Any, ...]]) -> bool:
+        from psycopg.pq import TransactionStatus
+
+        return connection.info.transaction_status in (TransactionStatus.INTRANS, TransactionStatus.INERROR)
 
     def last_insert_id(self, name: str | None = None) -> int | str | None:
         """``currval(name)``, or ``lastval()`` without a name; ``None`` when the session has no such value yet."""
@@ -79,10 +108,11 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
 
         options = self._options
         socket = self._socket
+        assert socket is not None  # checked by __init__
         parameters: dict[str, str | int | None] = {
             "dbname": self._name,
-            "user": socket.username if socket else None,
-            "password": socket.password if socket else None,
+            "user": socket.username,
+            "password": socket.password,
             "sslmode": options.get("ssl_mode"),
             "sslcert": options.get("ssl_cert"),
             "sslkey": options.get("ssl_key"),
@@ -118,11 +148,6 @@ class PsycopgAdapter(DBAPIAdapter["Connection[tuple[Any, ...]]"]):
         return query_with_params.question_marks_to_percent_s()
 
     def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
-        import psycopg
-
-        if not isinstance(error, psycopg.Error):
-            return None
-
         return map_psycopg_error(error, query, connecting=connecting)
 
 

@@ -13,7 +13,9 @@ DebugCallback = Callable[[str, float, str | None], None]
 """``debug(query, start, error)`` -- called after every statement, successful or not.
 
 ``query`` is the SQL with parameters interpolated, ``start`` is the ``time.time()`` at which the statement
-started and ``error`` is the driver's error message, or ``None`` on success.
+started and ``error`` is the driver's error message, or ``None`` on success. Parameters without a SQL literal
+(``inf``, ``nan``, driver specific types) are shown after the SQL as ``-- params: [...]`` instead. An exception
+raised by the callback is reported as a ``RuntimeWarning`` and never fails the statement.
 """
 
 
@@ -22,16 +24,18 @@ class Options(TypedDict, total=False):
 
     # -- threading (all adapters) -------------------------------------------------------------------
     max_connections: int
-    """Cap on concurrently open connections (one per thread). Unlimited when absent."""
+    """Cap on concurrently open connections (one per thread). Unlimited when absent. A thread holds its slot until
+    it exits or releases its connection (:meth:`~sentiencedb.Database.release_connection`,
+    :meth:`~sentiencedb.Database.connection`)."""
     acquire_timeout: float
     """Seconds a thread waits for a free slot before :class:`~sentiencedb.exceptions.ConnectionLimitError`.
     Waits forever when absent."""
 
     # -- MySQL / MariaDB adapter --------------------------------------------------------------------
     charset: str
-    """``SET NAMES <charset>`` after connecting."""
+    """Connection character set, passed to ``mysql.connector.connect()``."""
     collation: str
-    """``SET NAMES <charset> COLLATE <collation>`` (requires ``charset``)."""
+    """Connection collation, passed to ``mysql.connector.connect()``; works with or without ``charset``."""
     engine: str
     """``SET SESSION default_storage_engine = <engine>`` after connecting."""
 

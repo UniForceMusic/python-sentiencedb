@@ -71,12 +71,14 @@ def test_parametrised_statement_errors_are_mapped(db: Database) -> None:
     assert error.value.query == "INSERT INTO children (code, name) VALUES (?, ?)"
 
 
-def test_errors_while_fetching_are_mapped(db: Database) -> None:
+def test_errors_computing_later_rows_are_raised_by_the_statement(db: Database) -> None:
     db.exec("INSERT INTO children (id, name) VALUES (2, 'Bob')")
-    result = db.query("SELECT regexp_like(name, CASE id WHEN 1 THEN 'A' ELSE '(' END) FROM children ORDER BY id")
+    sql = "SELECT regexp_like(name, CASE id WHEN 1 THEN 'A' ELSE '(' END) FROM children ORDER BY id"
 
-    with pytest.raises(OperationalError):
-        result.fetch_dicts()
+    with pytest.raises(OperationalError) as error:
+        db.query(sql)
+
+    assert error.value.query == sql
 
 
 def test_own_exceptions_are_not_wrapped(db: Database) -> None:
@@ -84,12 +86,16 @@ def test_own_exceptions_are_not_wrapped(db: Database) -> None:
         db.prepared("SELECT ?, ?", [1])
 
 
-def test_debug_callback_exceptions_are_not_wrapped() -> None:
+def test_debug_callback_exceptions_become_warnings() -> None:
     def debug(query: str, start: float, error: str | None) -> None:
         raise ValueError(query)
 
-    with pytest.raises(ValueError, match="SELECT 1"), Database.connect_sqlite(debug=debug) as db:
-        db.exec("SELECT 1")
+    with Database.connect_sqlite(debug=debug) as db:
+        with pytest.warns(RuntimeWarning, match="SELECT 1"):
+            assert db.query("SELECT 1 AS one").scalar() == 1
+
+        with pytest.warns(RuntimeWarning), pytest.raises(OperationalError):
+            db.exec("SELECT * FROM missing")
 
 
 @pytest.mark.parametrize(
@@ -159,6 +165,11 @@ def test_psycopg_interface_error() -> None:
         ("IntegrityError", 1451, ForeignKeyViolationError),
         ("IntegrityError", 1452, ForeignKeyViolationError),
         ("IntegrityError", 1048, NotNullViolationError),
+        ("DatabaseError", 1364, NotNullViolationError),
+        ("DatabaseError", 1263, NotNullViolationError),
+        ("DatabaseError", 1366, DataError),
+        ("DataError", 1366, DataError),
+        ("DatabaseError", 1292, DataError),
         ("IntegrityError", 3819, CheckViolationError),
         ("DatabaseError", 3819, CheckViolationError),
         ("IntegrityError", 4025, CheckViolationError),
@@ -180,3 +191,28 @@ def test_mysql_connector_errors(name: str, errno: int, expected: type[DriverErro
     assert type(mapped) is expected
     assert (mapped.query, mapped.sqlstate, mapped.code) == ("SELECT 1", "23000", errno)
     assert str(mapped) == str(error)
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "expected"),
+    [
+        ("22007", DataError),
+        ("23000", IntegrityError),
+        ("42S02", ProgrammingError),
+        ("HY000", DriverError),
+        (None, DriverError),
+    ],
+)
+def test_mysql_generic_errors_fall_back_to_the_sqlstate_class(
+    sqlstate: str | None, expected: type[DriverError]
+) -> None:
+    errors = pytest.importorskip("mysql.connector.errors")
+
+    mapped = map_mysql_connector_error(errors.DatabaseError(msg="message", errno=1, sqlstate=sqlstate), None)
+
+    assert type(mapped) is expected
+
+
+def test_non_driver_exceptions_are_not_mapped() -> None:
+    for mapper in (map_sqlite3_error, map_psycopg_error, map_mysql_connector_error):
+        assert mapper(ValueError("x"), None) is None

@@ -58,6 +58,15 @@ def test_sqlite3_result_helpers(connection: sqlite3.Connection) -> None:
     assert SQLite3Result(connection.execute("SELECT s FROM t ORDER BY i")).fetch_objects()[1].s == "b"
 
 
+def test_sqlite3_result_reads_every_row_up_front(connection: sqlite3.Connection) -> None:
+    cursor = connection.execute("SELECT i FROM t ORDER BY i")
+    result = SQLite3Result(cursor)
+    cursor.close()
+
+    assert result.fetch_dict() == {"i": 1}
+    assert result.fetch_dicts() == [{"i": 2}]
+
+
 def test_snapshot_of_a_driver_result(connection: sqlite3.Connection) -> None:
     snapshot = Result.from_result(SQLite3Result(connection.execute("SELECT i FROM t ORDER BY i")))
 
@@ -69,12 +78,15 @@ class FakePsycopgCursor:
     """The parts of a psycopg cursor that :class:`PsycopgResult` reads."""
 
     def __init__(self, description: list[tuple[str, int]] | None, rows: list[tuple[Any, ...]]) -> None:
-        type_names = {23: "int4", 25: "text"}
+        # oid -> (name, array oid); the registry finds a type by its array oid too.
+        types = {23: ("int4", 1007), 1007: ("int4", 1007), 25: ("text", 1009)}
         self.description = (
             None if description is None else [SimpleNamespace(name=n, type_code=t) for n, t in description]
         )
         self.adapters = SimpleNamespace(
-            types=SimpleNamespace(get=lambda oid: SimpleNamespace(name=type_names[oid]) if oid in type_names else None)
+            types=SimpleNamespace(
+                get=lambda oid: SimpleNamespace(name=types[oid][0], array_oid=types[oid][1]) if oid in types else None
+            )
         )
         self._rows = rows
 
@@ -87,12 +99,14 @@ class FakePsycopgCursor:
 
 
 def test_psycopg_result() -> None:
-    cursor = FakePsycopgCursor([("id", 23), ("name", 25), ("mood", 99999)], [(1, "a", "happy"), (2, "b", None)])
+    cursor = FakePsycopgCursor(
+        [("id", 23), ("name", 25), ("mood", 99999), ("ids", 1007)], [(1, "a", "happy", [1]), (2, "b", None, [])]
+    )
     result = PsycopgResult(cursor)  # type: ignore[arg-type]
 
-    assert result.columns() == {"id": "INT4", "name": "TEXT", "mood": None}
-    assert result.fetch_dict() == {"id": 1, "name": "a", "mood": "happy"}
-    assert result.fetch_dicts() == [{"id": 2, "name": "b", "mood": None}]
+    assert result.columns() == {"id": "INT4", "name": "TEXT", "mood": None, "ids": "INT4[]"}
+    assert result.fetch_dict() == {"id": 1, "name": "a", "mood": "happy", "ids": [1]}
+    assert result.fetch_dicts() == [{"id": 2, "name": "b", "mood": None, "ids": []}]
     assert result.fetch_dict() is None
 
 

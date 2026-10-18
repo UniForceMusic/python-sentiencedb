@@ -214,6 +214,8 @@ def test_connection_cap(tmp_path: Path) -> None:
     options: Any = {"max_connections": 1, "acquire_timeout": 0.01}
 
     with Database.connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
+        db.query("SELECT 1")  # the main thread holds the only slot from here on
+
         with pytest.raises(ConnectionLimitError):
             run_in_thread(lambda: db.query("SELECT 1"))
 

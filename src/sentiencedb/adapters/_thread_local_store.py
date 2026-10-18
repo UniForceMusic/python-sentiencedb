@@ -22,10 +22,18 @@ class _ExitHook:
     def __init__(self, callback: Callable[[], None]) -> None:
         self._callback = callback
 
+    def disarm(self) -> None:
+        """Do nothing when the thread exits (its value was released early)."""
+        self._callback = _noop
+
     def __del__(self) -> None:
         # Thread teardown: nobody could handle an exception raised here.
         with contextlib.suppress(Exception):
             self._callback()
+
+
+def _noop() -> None:
+    pass
 
 
 class _ThreadSlot(threading.local):
@@ -34,7 +42,8 @@ class _ThreadSlot(threading.local):
 
 
 class ThreadLocalStore(Generic[T]):
-    """Opens one value (connection) per thread on first use and closes it when the thread exits.
+    """Opens one value (connection) per thread on first use and closes it when the thread exits, or earlier through
+    :meth:`release_current`.
 
     :param create: Creates a value for the calling thread.
     :param dispose: Closes a value; called from whichever thread evicts it.
@@ -105,6 +114,42 @@ class ThreadLocalStore(Generic[T]):
             self._thread_slot.exit_hook = _ExitHook(lambda: self._evict(key))
 
         return value
+
+    def current(self) -> T | None:
+        """The calling thread's value when it has one open, without opening it."""
+        key = None if self._shared else threading.current_thread()
+
+        with self._lock:
+            return self._values.get(key)
+
+    def release_current(self) -> bool:
+        """Close the calling thread's value and free its slot; the next :meth:`get` opens a new one.
+
+        A shared store keeps its single value: closing it would lose state every thread depends on (an in-memory
+        database).
+
+        :returns: Whether a value was closed.
+        """
+        if self._shared:
+            return False
+
+        key = threading.current_thread()
+
+        with self._lock:
+            value = self._values.pop(key, None)
+
+        hook = self._thread_slot.exit_hook
+        self._thread_slot.exit_hook = None
+
+        if hook is not None:
+            hook.disarm()
+
+        if value is None:
+            return False
+
+        self._discard(value)
+
+        return True
 
     def close(self) -> None:
         """Close every value; the store cannot be used afterwards."""

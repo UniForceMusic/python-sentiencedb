@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 class PsycopgResult(ResultABC):
     """Rows of a psycopg cursor (psycopg reads them into memory when the statement executes).
 
-    :meth:`columns` reports PostgreSQL type names in upper case (``INT4``, ``TEXT``, ``TIMESTAMPTZ``), ``None`` for
-    types psycopg does not know (e.g. user defined enums).
+    :meth:`columns` reports PostgreSQL type names in upper case (``INT4``, ``TEXT``, ``TIMESTAMPTZ``, ``INT4[]`` for
+    arrays), ``None`` for types psycopg does not know (e.g. user defined enums).
     """
 
     def __init__(self, cursor: Cursor[tuple[Any, ...]]) -> None:
@@ -27,7 +27,14 @@ class PsycopgResult(ResultABC):
 
         for column in self._cursor.description or ():
             type_info = types.get(column.type_code)
-            columns[column.name] = None if type_info is None else type_info.name.upper()
+
+            if type_info is None:
+                columns[column.name] = None
+            elif column.type_code == type_info.array_oid:
+                # The registry finds an element type by its array oid too.
+                columns[column.name] = f"{type_info.name.upper()}[]"
+            else:
+                columns[column.name] = type_info.name.upper()
 
         return columns
 
