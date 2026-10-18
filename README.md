@@ -169,9 +169,9 @@ with Database.connect_sqlite(queries=["PRAGMA foreign_keys = ON"]) as db:
 |---|---|---|
 | `max_connections: int` | all | Cap on open connections (one per thread). Unlimited when absent. |
 | `acquire_timeout: float` | all | Seconds a thread waits for a free slot before `ConnectionLimitError`. Waits forever when absent. |
-| `charset: str` | MySQL | Connection character set. |
-| `collation: str` | MySQL | Connection collation (use together with `charset`). |
-| `engine: str` | MySQL | `SET SESSION default_storage_engine = <engine>`. |
+| `charset: str` | MySQL, MariaDB | Connection character set, passed to `mysql.connector.connect()`. |
+| `collation: str` | MySQL, MariaDB | Connection collation, passed to `mysql.connector.connect()`; works with or without `charset`. |
+| `engine: str` | MySQL, MariaDB | `SET SESSION default_storage_engine = <engine>`. |
 | `ssl_mode`, `ssl_cert`, `ssl_key`, `ssl_root_cert`, `ssl_crl: str` | PostgreSQL | libpq `sslmode`, `sslcert`, `sslkey`, `sslrootcert`, `sslcrl`. |
 | `client_encoding: str` | PostgreSQL | libpq `client_encoding`. |
 | `search_path: str` | PostgreSQL | `SET search_path TO <search_path>` (inserted verbatim). |
@@ -194,6 +194,9 @@ with Database.connect_sqlite(queries=["PRAGMA foreign_keys = ON"]) as db:
 `debug(query, start, error)` is called after every statement, including failed ones and startup queries. `query` is
 the SQL with parameters interpolated (for display only; the statement itself was sent with bound parameters),
 `start` is the `time.time()` at which the statement started and `error` is the driver's message or `None`.
+Parameters that have no SQL literal (`inf`, `nan`, driver specific types) are shown after the SQL as
+`-- params: [...]` instead. The callback never breaks a statement: an exception it raises is reported as a
+`RuntimeWarning`.
 
 ```python
 import time
@@ -220,10 +223,30 @@ db.close()
 | `db.prepared(sql, params=(), emulate_prepare=False) -> ResultABC` | `?` placeholders with a sequence, or `:name` placeholders with a mapping (keys with or without the colon). |
 | `db.query_with_params(QueryWithParams(sql, params), emulate_prepare=False)` | Same, taking a `QueryWithParams`. |
 
-Placeholders inside string literals, quoted identifiers and `--` / `/* */` comments are ignored, and `::type` casts
-are not mistaken for named parameters. A mismatch between placeholders and parameters raises `QueryWithParamsError`.
-With `emulate_prepare=True` the parameters are rendered as SQL literals by the dialect and the statement is sent as
-plain SQL, for servers or poolers that cannot handle prepared statements.
+A mismatch between placeholders and parameters raises `QueryWithParamsError`. With `emulate_prepare=True` the
+parameters are rendered as SQL literals by the dialect and the statement is sent as plain SQL, for servers or poolers
+that cannot handle prepared statements.
+
+**Where placeholders are found.** A `?` or `:name` is a placeholder unless it sits inside a string, a quoted
+identifier or a comment, following the lexical rules of the connected engine; `::type` casts are never named
+parameters.
+
+| Engine | Skipped |
+|---|---|
+| SQLite | `'...'`, `"..."`, `` `...` ``, `[...]`, `-- ...`, `/* ... */` |
+| PostgreSQL | `'...'`, `E'...'` (backslash escapes), `$$...$$` and `$tag$...$tag$`, `"..."`, `-- ...`, nested `/* /* */ */` |
+| MySQL, MariaDB | `'...'` and `"..."` with backslash escapes, `` `...` ``, `# ...`, `-- ...` (with a space after `--`), `/* ... */` |
+
+Limitations and workarounds:
+
+- PostgreSQL's `?`, `?|` and `?&` jsonb operators read as placeholders once a statement has parameters. Use the
+  equivalent functions `jsonb_exists(col, ?)`, `jsonb_exists_any(col, ?)` and `jsonb_exists_all(col, ?)`, or run
+  the statement without parameters (`db.query()` sends it verbatim).
+- The tokenizer assumes the default server settings: backslash escapes in MySQL strings (no
+  `NO_BACKSLASH_ESCAPES` `sql_mode`) and `standard_conforming_strings = on` on PostgreSQL. With other settings a
+  string ending in a backslash can hide or expose a `?`; avoid such literals in statements with parameters, or
+  pass them as parameters.
+- MySQL's executable comments (`/*! ... */`) are skipped like any other comment.
 
 ```python
 from sentiencedb import Database, QueryWithParams
@@ -255,11 +278,15 @@ quoted separately: `["users", "id"]` becomes `"users"."id"`. A dotted string is 
 `"users.id"`, a single (probably non-existent) column. Any `Sql` object (see below) is emitted as is.
 
 **Values.** `None`, `bool`, `int`, `float`, `Decimal`, `str`, `bytes`, `date` and `datetime` are bound as
-parameters (booleans and datetimes converted to what the dialect stores). Timezone-aware datetimes keep their offset
-on PostgreSQL; MySQL, MariaDB and SQLite have no time zone type, so they are converted to UTC first and stored without
-offset (naive datetimes are stored as they are). SQLite stores datetimes at second precision. A `Sql` object is inlined together with its
-own parameters, and a `SelectQuery` becomes a parenthesised sub-select. Where a `Sql` object stands in an
-identifier position (a column, a table, `GROUP BY`, a default) its parameters are interpolated as literals instead.
+parameters (booleans and datetimes converted to what the dialect stores); `Enum` members are bound by value.
+Timezone-aware datetimes keep their offset on PostgreSQL; MySQL, MariaDB and SQLite have no time zone type, so the
+dialect converts them to UTC and they are stored without offset (naive datetimes are stored as they are). Bound
+values, `to_sql()` and `emulate_prepare` all use the same conversion. SQLite stores datetimes at second precision.
+On MySQL and MariaDB finite floats are bound as exact decimals (mysql-connector would otherwise send them as single
+precision floats), so a float selected straight back (`SELECT ?`) returns a `Decimal`. A `Sql` object is inlined
+together with its own parameters, and a `SelectQuery` becomes a parenthesised sub-select. Where a `Sql` object
+stands in an identifier position (a column, a table, `GROUP BY`, a default) its parameters are interpolated as
+literals instead.
 
 Helpers that create `Sql` objects and other values:
 
@@ -268,7 +295,7 @@ Helpers that create `Sql` objects and other values:
 | `raw(sql)` | Verbatim SQL. |
 | `identifier(name_or_path)` | A quoted identifier; use it to compare a column with another column. |
 | `alias(identifier, alias)` | `<identifier> AS <alias>`. |
-| `expression(sql, params=())` | SQL with `?` placeholders and the values to bind. |
+| `expression(sql, params=())` | SQL with `?` placeholders and a list of values to bind, or `:name` placeholders and a mapping. |
 | `expressionf(format, *values)` | printf style SQL: `%s` string, `%d` integer, `%f` / `%.2f` float, `%b` bool, `%%` a literal `%`. Plain values are bound; `Sql` values (e.g. `identifier(...)`) are inlined. |
 | `current_timestamp(precision=None)` | `CURRENT_TIMESTAMP[(precision)]`. |
 | `sub_query(select_query, alias)` | `(<select>) AS <alias>`. |
@@ -358,7 +385,7 @@ create_users.execute()
 The same `users` builder on the other engines (SQLite drops constraint names; it has no syntax for them):
 
 ```text
-MySQL / MariaDB:  `id` BIGINT NOT NULL AUTO_INCREMENT, ..., `active` TINYINT NOT NULL DEFAULT 1,
+MySQL / MariaDB:  `id` BIGINT NOT NULL AUTO_INCREMENT, ..., `active` TINYINT(1) NOT NULL DEFAULT 1,
                   `created_at` DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6), PRIMARY KEY (`id`),
                   CONSTRAINT `uq_users_email` UNIQUE (`email`), ...
 PostgreSQL:       "id" BIGSERIAL NOT NULL, ..., "active" BOOLEAN NOT NULL DEFAULT TRUE,
@@ -370,12 +397,12 @@ Portable types per engine (`TypeEnum` member and size):
 
 | `TypeEnum` | MySQL / MariaDB | PostgreSQL | SQLite |
 |---|---|---|---|
-| `BOOLEAN` | `TINYINT` | `BOOLEAN` | `BOOLEAN` (stores `1`/`0`) |
+| `BOOLEAN` | `TINYINT(1)` (the width marks it as a boolean for introspection) | `BOOLEAN` | `BOOLEAN` (stores `1`/`0`) |
 | `INTEGER` (bits <= 32 / > 32) | `INTEGER` / `BIGINT` | `INTEGER` / `BIGINT` | `INTEGER` / `BIGINT` |
 | `FLOAT` (bits <= 32 / > 32) | `FLOAT` / `DOUBLE` | `REAL` / `DOUBLE PRECISION` | `REAL` |
 | `VARCHAR` (length, default 255) | `VARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` |
 | `TEXT` (max length) | `TEXT`, `MEDIUMTEXT` (> 65535), `LONGTEXT` (> 16777215) | `TEXT` | `TEXT` |
-| `DATETIME` (precision) | `DATETIME(p)`, `DATETIME` when p is 0 | `TIMESTAMP` | `DATETIME` (second precision) |
+| `DATETIME` (precision) | `DATETIME(p)`, `DATETIME` when p is 0 | `TIMESTAMP(p)` below 6, else `TIMESTAMP` | `DATETIME` (second precision) |
 
 Identity columns per engine:
 
@@ -469,8 +496,8 @@ same set for `HAVING` with `having` in the name (`having_equals`, `or_having_in`
 | `where_in(column, values)` / `where_not_in(...)` | `column [NOT] IN (?, ...)`; `values` may be a `SelectQuery`. An empty list gives `1 = 0` (`1 = 1` for `NOT IN`). |
 | `where_like(column, pattern, case_insensitive=False)` / `where_not_like(...)` | `LIKE` with your own `%` / `_` wildcards. |
 | `where_starts_with`, `where_ends_with`, `where_contains`, `where_not_contains` `(column, value, case_insensitive=False)` | `LIKE` with `value` matched literally (wildcards in it are escaped). |
-| `where_glob(column, pattern, case_insensitive=False)` / `where_not_glob(...)` | `GLOB` on SQLite; translated to `LIKE` elsewhere. |
-| `where_regex(column, pattern, flags="")` / `where_not_regex(...)` | Regular expression match; `flags` such as `"i"`. |
+| `where_glob(column, pattern, case_insensitive=False)` / `where_not_glob(...)` | `GLOB` on SQLite. Elsewhere the pattern becomes a `LIKE` pattern, or, when it has a character class such as `[a-z]`, an anchored regex. |
+| `where_regex(column, pattern, flags="")` / `where_not_regex(...)` | Regular expression match. `flags` is any combination of `i` (ignore case), `m` (`^` and `$` match at line breaks) and `s` (`.` matches a newline); other flags raise `QueryError`. |
 | `where_empty(column)` / `where_not_empty(column)` | `NULL`, `0` or `''` / none of those (zero is compared as `'0'`, which every engine coerces to the column type). |
 | `where_exists(select_query)` / `where_not_exists(...)` | `[NOT] EXISTS (<select>)` |
 | `where_group(callback)` / `where_not_group(callback)` | A parenthesised `( ... )` / `NOT ( ... )` group. The callback receives a `WhereGroup`; returning it is optional. Empty groups are dropped. |
@@ -515,15 +542,22 @@ print(names(db.select("users").where_in("id", prolific)))  # ['Alice']
 Engine notes:
 
 - **LIKE.** Case sensitive: PostgreSQL `LIKE`, MySQL `LIKE BINARY`, SQLite `GLOB` (SQLite's `LIKE` ignores ASCII case,
-  so the pattern is translated). Case insensitive: PostgreSQL `ILIKE`, MySQL `LIKE` (follows the column collation),
-  SQLite `LIKE ... ESCAPE '\'`. Patterns are always bound as parameters.
+  so the pattern is translated). Case insensitive: PostgreSQL `ILIKE`; MySQL
+  `lower(convert(col USING utf8mb4)) LIKE lower(?)`, which also ignores case on `_bin` / `_cs` collations and binary
+  columns; SQLite `LIKE ... ESCAPE '\'` (compared through `lower()` when the `deprecated_case_sensitive_like` option
+  makes `LIKE` case sensitive). Patterns are always bound as parameters.
+- **GLOB** outside SQLite: `*` becomes `%`, `?` becomes `_` and a one-character class such as `[*]` the literal
+  character, in a `LIKE` with the case rules above. Any other character class (`[a-z]`, `[!0-9]`) turns the whole
+  pattern into an anchored regex.
 - **Regex.** PostgreSQL 15+ and MySQL 8+ use `regexp_like(column, pattern, flags)`; older PostgreSQL uses `~` / `!~`
   and MariaDB and older MySQL use `REGEXP`, with flags as a `(?flags)` prefix. The `use_tilde_regex` and
-  `use_regexp` options force the operator form. Matching is case sensitive unless the flags contain `i`, also on
-  MySQL and MariaDB, whose collations usually ignore case: `regexp_like()` gets match type `c` before the flags
-  (inlined as a literal, as MySQL rejects a bound one) and `REGEXP` a `(?-i)` prefix. SQLite has no regex support of
-  its own: the adapter registers `regexp_like(value, pattern, flags)` and `REGEXP` on every connection, implemented
-  with Python's `re` (flags `i`, `m`, `s`, `x`).
+  `use_regexp` options force the operator form. The flags `i`, `m` and `s` mean the same everywhere: without `s`,
+  `.` does not match a newline, also on PostgreSQL (whose own default differs; the dialect translates the flags into
+  its newline modes), and matching is case sensitive unless the flags contain `i`, also on MySQL and MariaDB, whose
+  collations usually ignore case: `regexp_like()` gets match type `c` before the flags (`s` is spelled `n` there;
+  the match type is inlined as a literal, as MySQL rejects a bound one) and `REGEXP` a `(?-i)` prefix. MySQL before
+  8.0 accepts no flag but `s`. SQLite has no regex support of its own: the adapter registers
+  `regexp_like(value, pattern, flags)` and `REGEXP` on every connection, implemented with Python's `re`.
 - **`cast=True`** casts to `UNSIGNED`, `SIGNED`, `DECIMAL` or `CHAR` on MySQL, and to the portable types elsewhere.
 
 ## Joins
@@ -577,7 +611,7 @@ print(raw_join.count())  # 3
 | `on_conflict_do_nothing(conflict)` | Skip rows that conflict. Alias: `insert_ignore`. |
 | `on_conflict_do_update(conflict, updates=None)` | Update the conflicting row with `updates`; without `updates` every inserted column is overwritten with its new value. Alias: `on_duplicate_key_update`. |
 | `last_insert_id(column)` | Name the auto increment column (needed by MySQL upserts and `RETURNING` emulation). |
-| `emulate_on_conflict(last_insert_id)` | Emulate the upsert even where it is supported natively. (`in_transaction` is still accepted and ignored: the emulation always runs in a transaction.) |
+| `emulate_on_conflict(last_insert_id)` | Emulate the upsert even where it is supported natively (see below). |
 
 `conflict` is a list of the unique columns, or a constraint name as a string (PostgreSQL only; SQLite raises
 `QueryError`, MySQL ignores the target because `ON DUPLICATE KEY UPDATE` reacts to every unique key).
@@ -608,7 +642,10 @@ The generated SQL per engine:
 | Engine | `on_conflict_do_nothing` | `on_conflict_do_update` |
 |---|---|---|
 | PostgreSQL 9.5+, SQLite 3.24+ | `ON CONFLICT (cols) DO NOTHING` | `ON CONFLICT (cols) DO UPDATE SET c = excluded.c, ...` |
-| MySQL, MariaDB | `INSERT IGNORE` (`ON DUPLICATE KEY UPDATE id = last_insert_id(id)` when `last_insert_id` is set) | `ON DUPLICATE KEY UPDATE c = values(c), ...` (plus `id = last_insert_id(id)` when `last_insert_id` is set, so `LAST_INSERT_ID()` returns the existing row's id) |
+| MySQL, MariaDB | `ON DUPLICATE KEY UPDATE c = c` on the first conflict column (else the first inserted column), or `id = last_insert_id(id)` when `last_insert_id` is set | `ON DUPLICATE KEY UPDATE c = values(c), ...` (plus `id = last_insert_id(id)` when `last_insert_id` is set, so `LAST_INSERT_ID()` returns the existing row's id) |
+
+On MySQL and MariaDB a do-nothing upsert is an update that changes nothing, rather than `INSERT IGNORE`, which also
+turns `NOT NULL`, truncation and foreign key errors into warnings: here only duplicate keys are skipped.
 
 Refer to columns of the existing row qualified with the table name (`identifier(["users", "age"])` above): an
 unqualified column in `DO UPDATE SET` is ambiguous on PostgreSQL.
@@ -720,8 +757,8 @@ print(deleted.execute().fetch_dicts())  # [{'id': 7}, {'id': 8}]
 | `drop_constraint(name)` | `DROP CONSTRAINT`; MySQL uses `DROP INDEX`. |
 | `alter(sql)` | A raw operation after `ALTER TABLE <table>`. |
 
-SQLite cannot alter columns, add or drop constraints or add primary keys this way, and renames need SQLite 3.25; those
-operations raise `QueryError` before any statement runs.
+SQLite cannot alter columns, add or drop constraints or add primary keys this way; renames need SQLite 3.25 and
+`drop_column` 3.35. Those operations raise `QueryError` before any statement runs.
 
 ```python
 alter = db.alter_table("posts").add_varchar("slug", 50).add_datetime("published_at").rename_column("body", "content")
@@ -741,8 +778,9 @@ db.drop_table("scratch").if_exists().execute()  # no error: the table is gone
 
 `if_not_exists()` / `if_exists()` on tables and indexes are emitted natively where the engine supports them (see the
 [matrix](#dialect-differences)). Elsewhere, or after `emulate_if_not_exists()` / `emulate_if_exists()`, the builder
-checks [introspection](#schema-introspection) first and returns an empty `Result` without running anything when
-there is nothing to do.
+asks the database first (`information_schema_table_exists()` / `information_schema_index_exists()`, see
+[introspection](#schema-introspection)) and returns an empty `Result` without running anything when there is nothing
+to do. A `["schema", "table"]` path is looked up in that schema.
 
 ## Indexes
 
@@ -803,8 +841,8 @@ The manual API:
 | Method | Outside a transaction | Inside a transaction |
 |---|---|---|
 | `begin_transaction(name=None)` | `BEGIN` (`START TRANSACTION` on MySQL) | `SAVEPOINT <name>` (default `savepoint_<n>`) |
-| `commit_transaction(release_savepoints=False)` | no-op | `RELEASE SAVEPOINT` of the innermost savepoint, or `COMMIT` when there is none or `release_savepoints=True` |
-| `rollback_transaction(release_savepoints=False)` | no-op | `ROLLBACK TO` the innermost savepoint, or `ROLLBACK` when there is none or `release_savepoints=True` |
+| `commit_transaction(release_savepoints=False, name=None)` | no-op | `RELEASE SAVEPOINT` of the savepoint `name` (default the innermost one) and the savepoints opened after it, or `COMMIT` when there is none or `release_savepoints=True` |
+| `rollback_transaction(release_savepoints=False, name=None)` | no-op | `ROLLBACK TO` the savepoint `name` (default the innermost one), dropping the savepoints opened after it, or `ROLLBACK` when there is none or `release_savepoints=True` |
 | `in_transaction()` | `False` | `True` |
 
 ```python
@@ -818,6 +856,12 @@ print(db.in_transaction())  # False
 print(db.select("users").columns(["name"]).where_in("name", ["Frank", "Grace"]).execute().fetch_dicts())
 # [{'name': 'Frank'}]
 ```
+
+An unknown savepoint `name` raises `AdapterError`, and so does beginning a nested transaction on a dialect without
+savepoints. On PostgreSQL a transaction aborted by an earlier error cannot commit: `commit_transaction()` rolls it
+back (to the savepoint) and raises `OperationalError`. `transaction()` always ends exactly the level it opened,
+including savepoints the callback left open; when its rollback fails as well, that error is added to the original
+exception as a note.
 
 Transactions belong to the calling thread's connection (except for SQLite in-memory databases, see
 [Threading](#threading)). MySQL and MariaDB commit implicitly on DDL statements.
@@ -885,7 +929,8 @@ print(active, db.dialect.parse_bool(active))  # 1 True
 | `create_index(name)` / `drop_index(name)` | `db.create_index(table, name)` / `db.drop_index(table, name)` |
 | `columns()`, `primary_keys()`, `unique_constraints()`, `foreign_key_constraints()`, `indexes()` | `db.information_schema_*(name)` |
 
-Introspection uses the table's unqualified name: the last part of a path, or the SQL of a `Sql` object.
+Introspection covers the current database / schema: an `identifier(...)` table is looked up by its name and any
+other `Sql` by its SQL, while a schema-qualified `["schema", "table"]` path raises `QueryError`.
 
 ```python
 users = db.table("users")
@@ -903,15 +948,18 @@ users.delete().where_equals("name", "Heidi").execute()
 | Method | Returns |
 |---|---|
 | `information_schema_schemas()` | Schema names (SQLite: the file of every attached database). |
-| `information_schema_tables()` | Base table names in the current database / schema, without internal tables. |
+| `information_schema_tables(schema=None)` | Base table names in `schema` (default: the current database / schema), without internal tables. |
+| `information_schema_table_exists(table, schema=None)` | Whether the base table exists in `schema`. One catalog query; `pg_catalog` on PostgreSQL (also sees tables the role cannot read), case insensitive on SQLite. |
+| `information_schema_index_exists(table, name, schema=None)` | Whether an index `name` exists where it would clash with a new index on `table`: on `table` itself on MySQL and MariaDB (index names are per table), anywhere in the schema on PostgreSQL and SQLite. |
 | `information_schema_columns(table)` | `list[Column]` in ordinal order. `type` is a portable `Type` where one fits, else the raw SQL type; `default` is the default expression as `Raw(sql)`, or `None`. |
 | `information_schema_primary_keys(table)` | Primary key column names in key order. |
 | `information_schema_unique_constraints(table)` | `list[UniqueConstraint]`. On MySQL and MariaDB this includes unique indexes, which MySQL does not tell apart from constraints. |
 | `information_schema_foreign_key_constraints(table)` | `list[ForeignKeyConstraint]` with the referenced table and columns and the referential actions. |
 | `information_schema_indexes(table)` | `list[Index]` (`name`, `columns`, `unique`), without the primary key. Expression indexes are skipped and partial indexes are returned without their predicate. On SQLite the indexes behind `UNIQUE` constraints (`sqlite_autoindex_*`) are included. |
 
-`table` is an unqualified name in the connection's current database or schema. Because defaults come back as `Raw`
-SQL, introspected columns can be fed straight back into a `CREATE TABLE`.
+`table` is an unqualified name. `schema` is a schema on PostgreSQL, a database on MySQL and MariaDB, and an attached
+database (`main`, `temp`, ...) on SQLite; the per-table methods only cover the current one. Because defaults come
+back as `Raw` SQL, introspected columns can be fed straight back into a `CREATE TABLE`.
 
 ```python
 print("posts" in db.information_schema_tables())  # True
@@ -1010,11 +1058,12 @@ Integrity errors are refined by code:
 |---|---|---|---|
 | `UniqueViolationError` | `23505` | `1062`, `1586` | `2067`, `1555` |
 | `ForeignKeyViolationError` | `23503` | `1216`, `1217`, `1451`, `1452` | `787` |
-| `NotNullViolationError` | `23502` | `1048` | `1299` |
+| `NotNullViolationError` | `23502` | `1048`, `1263`, `1364` | `1299` |
 | `CheckViolationError` | `23514` | `3819`, `4025` (MariaDB) | `275` |
 
 These codes decide the class even when the driver does not raise them as an integrity error (MySQL raises `3819` as a
-plain `DatabaseError`). Otherwise the class follows the driver's own classification, which differs per engine: a syntax error is a
+plain `DatabaseError`); MySQL's `1292` and `1366` (invalid values) are `DataError`s. Otherwise the class follows the
+driver's own classification, falling back to the SQLSTATE class, and it differs per engine: a syntax error is a
 `ProgrammingError` on PostgreSQL and MySQL but an `OperationalError` on SQLite.
 
 ```python
@@ -1051,10 +1100,12 @@ Version thresholds below are in `major.minor.patch` form.
 | Identifier quote | `` ` `` | `` ` `` | `"` | `"` |
 | String literals | backslash escapes | backslash escapes | ANSI (`''`) | ANSI (`''`) |
 | Booleans (bound / literal) | `1` / `0` | `1` / `0` | `TRUE` / `FALSE` | `1` / `0` |
-| Datetime literals | microseconds | microseconds | microseconds + UTC offset | seconds |
+| `BOOLEAN` column | `TINYINT(1)` | `TINYINT(1)` | `BOOLEAN` | `BOOLEAN` |
+| Datetime literals (aware datetimes) | microseconds (in UTC) | microseconds (in UTC) | microseconds + UTC offset | seconds (in UTC) |
+| Placeholder lexing | backslash escapes, `#` comments | same as MySQL | `E''`, `$$`, nested comments | `[..]` identifiers |
 | `DISTINCT ON` | no | no | 7.2+ | no |
 | `LATERAL` joins | 8.0.14+ | no | 9.3+ | no |
-| Native upsert | 4.1+ (`ON DUPLICATE KEY UPDATE`, `INSERT IGNORE`) | yes | 9.5+ (`ON CONFLICT`) | 3.24+ (`ON CONFLICT`, no named constraints) |
+| Native upsert | 4.1+ (`ON DUPLICATE KEY UPDATE`) | yes | 9.5+ (`ON CONFLICT`) | 3.24+ (`ON CONFLICT`, no named constraints) |
 | `RETURNING` on `INSERT` / `DELETE` | no (`INSERT` emulated) | 10.5+ | 8.2+ | 3.35+ |
 | `RETURNING` on `UPDATE` | no | no | 8.2+ | 3.35+ |
 | `IF [NOT] EXISTS` on tables | 3.23.0+ | yes | 9.1+ | 3.3+ |
@@ -1062,19 +1113,23 @@ Version thresholds below are in `major.minor.patch` form.
 | Partial indexes | no | no | yes | yes |
 | `DEFAULT` in multi-row `VALUES` | yes | yes | yes | no |
 | Auto increment | `AUTO_INCREMENT` | `AUTO_INCREMENT` | `SERIAL` / `BIGSERIAL`; identity with `use_serials=False` (10+) | `INTEGER PRIMARY KEY AUTOINCREMENT` |
-| Case-sensitive / -insensitive `LIKE` | `LIKE BINARY` / `LIKE` | `LIKE BINARY` / `LIKE` | `LIKE` / `ILIKE` | `GLOB` / `LIKE ... ESCAPE '\'` |
-| `GLOB` | as `LIKE` | as `LIKE` | as `LIKE` | native |
+| Case-sensitive / -insensitive `LIKE` | `LIKE BINARY` / `lower(convert(.. USING utf8mb4)) LIKE lower(..)` | same as MySQL | `LIKE` / `ILIKE` | `GLOB` / `LIKE ... ESCAPE '\'` |
+| `GLOB` | `LIKE` or regex | `LIKE` or regex | `LIKE` or regex | native |
 | Regex | `regexp_like()` (8.0+), else `REGEXP` | `REGEXP` | `regexp_like()` (15+), else `~` | `regexp_like()` (Python function) or `REGEXP` |
+| Regex flags | `i`, `m`, `s` (8.0+), else `s` | `i`, `m`, `s` | `i`, `m`, `s` | `i`, `m`, `s` |
 | `alter_column` | `MODIFY` | `MODIFY` | `ALTER COLUMN` | `QueryError` |
 | `rename_column` | yes | yes | yes | 3.25+ |
+| `drop_column` | yes | yes | yes | 3.35+ |
 | Add primary key / constraints, `drop_constraint` | yes (`drop_constraint` is `DROP INDEX`) | same as MySQL | yes | `QueryError` |
 | `DROP INDEX` | `... ON table` | `... ON table` | plain | plain |
 | `BEGIN` statement | `START TRANSACTION` | `START TRANSACTION` | `BEGIN TRANSACTION` | `BEGIN TRANSACTION` |
 | Savepoints | yes | yes | yes | yes |
 | `STRICT` tables | – | – | – | option `strict` |
 
-The MySQL dialect assumes the default `sql_mode` (no `ANSI_QUOTES`, no `NO_BACKSLASH_ESCAPES`) and PostgreSQL assumes
-`standard_conforming_strings = on` (the default since 9.1).
+String literals the dialects write are valid whatever the `sql_mode` or `standard_conforming_strings`: MySQL quotes
+identifiers with backticks and strings with `'` (so `ANSI_QUOTES` does not matter) and doubles quotes, and PostgreSQL
+writes a string with a backslash as an `E'...'` string. The placeholder tokenizer does assume the defaults; see
+[Raw SQL](#raw-sql).
 
 ## Version encoding
 
@@ -1118,7 +1173,8 @@ docker compose up -d                      # optional: PostgreSQL, MySQL and Mari
 
 `docker-compose.yml` starts PostgreSQL on `localhost:5432` (user `postgres`, trust authentication), MySQL on
 `localhost:3306` and MariaDB on `localhost:3307` (both user `root` with an empty password). The tests for each server
-skip when it is unreachable; the MySQL and MariaDB tests create a `sentiencedb` database themselves.
+skip when it is unreachable; they create (and drop) their own `sentiencedb_*` databases and schemas, and `main.py`
+creates a `sentiencedb` database on MySQL and MariaDB.
 
 ## About this port
 
