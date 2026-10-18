@@ -4,27 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentiencedb"
-version = "1.0.2"
-description = "A Python database abstraction layer (Sentiencedb) supporting PostgreSQL, SQLite, and MySQL."
+version = "2.0.0"
+description = "A Python database abstraction layer (Sentiencedb) supporting PostgreSQL, SQLite, MySQL and MariaDB."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-keywords = ["database", "abstraction", "sql", "postgresql", "sqlite", "mysql"]
+keywords = ["database", "abstraction", "sql", "query-builder", "postgresql", "sqlite", "mysql", "mariadb"]
 
 authors = [
     {name = "UniForceMusic"},
 ]
 
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 
 dependencies = []
@@ -37,23 +39,38 @@ mysql = [
     "mysql-connector-python>=9.0",
 ]
 dev = [
-    "pytest>=7.0",
-    "mypy>=1.0",
-    "ruff>=0.1",
+    "pytest>=8.0",
+    "mypy>=1.10",
+    "ruff>=0.6",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+sentiencedb = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = ["--import-mode=importlib", "--strict-markers"]
+markers = [
+    "integration: needs a running database server (skipped when it is unreachable)",
+]
 
 [tool.mypy]
 strict = true
 python_version = "3.11"
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["mysql.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF"]

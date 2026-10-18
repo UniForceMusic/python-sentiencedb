@@ -1,94 +1,61 @@
 # sentiencedb — Agent Instructions
 
-A Python database abstraction layer (PostgreSQL + SQLite + MySQL), ported from PHP `sentience/database`.
+A Python database abstraction layer for SQLite, PostgreSQL, MySQL and MariaDB: a port of the PHP package
+`sentience/database` (branch `v1`). Version 2.0.0 is a from-scratch rewrite (branch `rewrite/v2`); the
+`README.md` still describes 1.x and will be rewritten.
 
-## Quick start
+## Setup
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev,postgres,mysql]'
 ```
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `python3 -m pytest` | Run all 191 tests (unit + SQLite integration) |
-| `python3 -m pytest tests/test_integration_sqlite.py` | SQLite integration tests |
-| `python3 -m pytest tests/test_integration_postgres.py` | PostgreSQL integration tests (skips when PG not reachable on localhost:5432; run `docker compose up -d postgres`) |
-| `python3 -m pytest tests/test_integration_mysql.py` | MySQL integration tests (skips when MySQL not reachable on localhost:3306; run `docker start sentience-v3-mysql-1` or any `mysql` container with `MYSQL_ALLOW_EMPTY_PASSWORD=yes` on port 3306 — the suite auto-creates the `sentiencedb` database) |
-| `python3 -m pytest tests/test_dialect_sql.py -k "test_select"` | Single test or pattern |
-| `python3 -m mypy src/sentiencedb` | Typecheck (strict mode). Clean — no issues. |
-| `python3 -m ruff check src/sentiencedb/ tests/` | Lint. Clean — no issues. |
-| `python3 main.py` | Run the example script (SQLite + PostgreSQL + MySQL CRUD + giant select) |
+| `.venv/bin/python -m pytest -q` | All tests (integration tests skip when their server is unreachable) |
+| `.venv/bin/python -m mypy src/sentiencedb` | Type check (strict) |
+| `.venv/bin/python -m ruff check src/sentiencedb tests` | Lint |
+| `.venv/bin/python -m ruff format src/sentiencedb tests` | Format (line length 120) |
+| `docker compose up -d postgres mysql` | Servers for integration tests (PG `localhost:5432` user `postgres` trust auth; MySQL `localhost:3306` root, empty password) |
 
-No Makefile, CI workflows, or pre-commit hooks exist.
+All four gates must pass before handing work back.
 
-## Architecture
+## Layout (`src/sentiencedb/`)
 
-Four pillars under `src/sentiencedb/`:
+Mirrors the PHP package; one public class per module, module name = snake_case of the class.
 
-- **`dialects/`** — SQL generation (`SQLDialect` base, `PostgresqlDialect`, `SQLiteDialect`). `SQLDialect` is the largest file (~713 lines).
-- **`adapters/`** — Connection wrappers (`SQLiteAdapter`, `PsycopgAdapter`).
-- **`query/`** — Fluent query builders (`SelectQuery`, `InsertQuery`, `UpdateQuery`, `DeleteQuery`, `CreateTableQuery`, `AlterTableQuery`, `DropTableQuery`). Mixins: `WhereMixin`, `HavingMixin`, `JoinsMixin`, etc.
-- **`result/`** — Result set abstraction (`Result`, `SQLite3Result`, `PsycopgResult`). Methods: `fetch_dict()`, `fetch_dicts()`, `scalar()`, `fetch_object()`, `fetch_objects()`, `columns()`.
+- `database.py` (`Database`, facade) / `database_abc.py` (`DatabaseABC`)
+- `driver.py` — `Driver` enum (`MARIADB`, `MYSQL`, `PGSQL`, `SQLITE`) creating adapter, dialect and schema
+- `options.py` — `Options` (flat `TypedDict` of connection + dialect options), `DebugCallback`
+- `exceptions.py` — `DatabaseError` hierarchy; driver errors are wrapped in `DriverError` subclasses
+- `sockets/` — `NetworkSocket(host, port, ...)`, `UnixSocket(path, ...)`
+- `adapters/` — `AdapterABC`; `SQLite3Adapter` (stdlib), `PsycopgAdapter` (psycopg 3), `MySQLConnectorAdapter`
+- `dialects/` — `DialectABC` + `parse_version`; `SQLDialect` and `MySQLDialect`, `PgSQLDialect`, `SQLiteDialect`
+- `schemas/` — `SchemaABC`; introspection per engine, held by `Database` (never part of a dialect)
+- `results/` — `ResultABC`, `Result` (in memory), one driver result per adapter
+- `queries/` — builders (`SelectQuery`, `InsertQuery`, ...), `QueryFactory`, `query.py` (`Query` base),
+  `helpers.py` (`raw`, `identifier`, `alias`, `expression`, `expressionf`, ...), `enums.py`, `type_aliases.py`,
+  `objects/` (value objects, `QueryWithParams`), `mixins/` (the PHP traits)
 
-User-facing facade: `from sentiencedb.database import DB`
+## Conventions
 
-```python
-db = DB.connect_sqlite(":memory:")
-db = DB.connect_postgresql("mydb", host="localhost", user="postgres")
-result = db.select("users").where_equals("name", "Alice").execute()
-row = result.fetch_dict()
-```
-
-## Import gotchas
-
-- `PsycopgAdapter` is NOT exported from `sentiencedb.adapters` — import directly: `from sentiencedb.adapters.postgres import PsycopgAdapter`
-- `PsycopgResult` is NOT exported from `sentiencedb.result` — import directly: `from sentiencedb.result.postgres import PsycopgResult`
-- `raw()`, `identifier()`, `alias()`, `expression()`, `sub_query()`, `current_timestamp()`, `now()` — module-level functions: `from sentiencedb._helpers import raw`
-- `Snapshot` a result: `from sentiencedb.result._result import snapshot_result`
-
-## Key conventions
-
-- **ABCs over Protocols** — nominal subtyping (`abc.ABC`) used everywhere.
-- **Mixins over traits** — multiple inheritance with `WhereMixin`, `HavingMixin`, etc.
-- **Fluent API returns `Self`** — all query builder methods return `Self` for chaining.
-- **`to_query_with_params()`** — central method that returns `QueryWithParams(query, params)`. Each query class implements this.
-- **`execute(emulate_prepare=False)`** — runs via the bound database, returns `ResultABC`.
-- **`emulate_prepare`** — parameter for `query_with_params()` and `execute()` (used for drivers without native prepared statements).
-- **`from __future__ import annotations`** — used in every file.
-- **`if TYPE_CHECKING`** — used for lazy imports in type stubs.
-
-## Dialect quirks
-
-- `SQLDialect` properties like `bool`, `distinct_on`, `on_conflict`, `returning` are instance attributes (not abstract properties), set in `__init__`.
-- `PostgresqlDialect.datetime_format = "%Y-%m-%d %H:%M:%S.%f"` (microseconds).
-- `SQLiteDialect` raises `QueryError` for ALTER COLUMN, DROP COLUMN, named constraints, and named ON CONFLICT.
-- Version parsing: `"15.2"` → `150200` (major\*100^2 + minor\*100 + patch).
-
-## Testing
-
-- **Testing**: 191 unit tests pass (no database needed). 6 SQLite integration tests pass.
-- **Unit tests** (no database): `test_dialect_*.py`, `test_*_query.py`, `test_conditions.py`, `test_joins.py`, `test_expressions.py`, `test_query_with_params.py`, `test_result_abstract.py`.
-- **Integration tests**: `test_integration_sqlite.py` uses SQLite `:memory:` — no external services needed. `test_integration_postgres.py` requires a PostgreSQL service on `localhost:5432` (skipped via `pytestmark` when unreachable; run `docker compose up -d postgres`). `test_integration_mysql.py` requires a MySQL service on `localhost:3306` with `MYSQL_ALLOW_EMPTY_PASSWORD=yes` (skipped via a session-scoped fixture when unreachable; the suite auto-creates the `sentiencedb` database and drops all user tables between tests).
-- **Fixtures**: `conftest.py` provides `sql_dialect`, `sqlite_dialect`, `pg_dialect`, `mysql_dialect`. The postgres integration module defines its own `pg_adapter` / `pg_dialect` / `pg_db` yield fixtures. The mysql integration module defines `mysql_adapter` / `mysql_dialect` (the latter overrides the conftest one within that module) plus a session-scoped `_sentiencedb_database` bootstrap fixture.
-- **DDL has no parameters** — use `adapter.exec(qwp.query)` not `adapter.query_with_params()`.
-- **DML uses parameters** — use `adapter.query_with_params(dialect, qwp)`.
-- **Placeholder conversion lives in adapters** — each adapter converts the dialect's `?` placeholders to its driver's native format:
-  - `SQLiteAdapter.query_with_params()` calls `percent_s_to_question_marks()` — `%s` → `?` (SQLite uses `?` natively)
-  - `PsycopgAdapter.query_with_params()` calls `question_marks_to_percent_s()` — `?` → `%s` (psycopg uses `%s`)
-  - `MySQLAdapter.query_with_params()` calls `question_marks_to_percent_s()` — `?` → `%s` (mysql.connector uses `%s`)
-  - Both methods are on `QueryWithParams` and use `REGEX_PATTERN` to skip placeholders inside quoted strings and comments.
-  - The `DatabaseABC.prepared()` method passes the `QueryWithParams` through unchanged — the adapter handles conversion.
-- **MySQL now uses `autocommit=True`** — `MySQLAdapter._connect()` passes `autocommit=True` to `mysql.connector.connect()`. Every statement commits immediately. No implicit transaction workarounds needed.
-- **Fluent table reassignment** — use `.table("new_table")` instead of `.from_("new_table")` on `SelectQuery`, `DeleteQuery`, and `DropTableQuery`.
-- **Qualified column references** — pass columns/conditions as two-element lists (e.g. `["users", "id"]`) or wrap in `identifier(["users","id"])`. A dotted string like `"users.id"` is treated as a single identifier and escaped as `` `users.id` `` (non-existent column). Use `raw("...")` (a `SqlABC`) for raw JOIN clauses and aggregate expressions — `JoinsMixin.join()` ignores bare strings.
-- **Schema-qualified INSERT/DELETE/UPDATE/CREATE** — pass `list[str]` directly (e.g. `db.insert(["schema", "table"])`). The dialect handles list splitting natively.
+- Python >= 3.11, no runtime dependencies; `from __future__ import annotations` everywhere; relative imports.
+- Interfaces are `abc.ABC` subclasses named `...ABC`. Fluent builder methods return `Self`.
+- Driver packages are imported lazily inside functions; `import sentiencedb` must work without them.
+- Builders hold state only. They hand plain data (`queries/objects`) to the dialect through keyword-only statement
+  methods (`dialect.select(table=..., where=..., ...)`); dialects never import builders. A `Query` used as a value
+  is a sub-select.
+- Dialects emit `?` placeholders; adapters convert them (`QueryWithParams.question_marks_to_percent_s()` for psycopg;
+  SQLite and MySQL prepared cursors use `?` natively).
+- Qualified identifiers are lists (`["schema", "table"]`); a dotted string is a single identifier. Use `raw(...)` for
+  verbatim SQL and `identifier(...)` for an escaped identifier in a value position.
+- Server versions are encoded as `major * 10000 + minor * 100 + patch` (`"16.2"` -> `160200`).
+- Value objects are frozen dataclasses; use `dataclasses.replace` for modified copies.
 
 ## Reference
 
-- `PLAN.md` — 801-line implementation plan with architecture decisions, detailed method lists, and testing strategy.
-- `README.md` — Comprehensive user-facing documentation with API reference, examples, and architecture overview.
-- `SentienceDatabase/` — PHP reference implementation (not part of the Python package).
-- `docker-compose.yml` — provides MySQL and PostgreSQL services (used by `test_integration_postgres.py`).
+- PHP source: `/Users/koen/Documents/Github/Sentience-Framework/database` (`src/`, branch `v1`).
+- `docker-compose.yml` — MySQL and PostgreSQL services for the integration tests.

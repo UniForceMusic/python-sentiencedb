@@ -220,3 +220,5 @@ __marimo__/
 # SQLite database files
 *.sqlite
 *.sqlite-journal
+
+.claude

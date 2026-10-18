@@ -1,13 +1,11 @@
-from sentiencedb.dialects._base import DialectABC
-from sentiencedb.dialects._sql_dialect import SQLDialect
-from sentiencedb.dialects.mysql import MySQLDialect
-from sentiencedb.dialects.postgres import PostgresqlDialect
-from sentiencedb.dialects.sqlite import SQLiteDialect
+"""SQL generation per database engine."""
 
-__all__ = [
-    "DialectABC",
-    "MySQLDialect",
-    "PostgresqlDialect",
-    "SQLDialect",
-    "SQLiteDialect",
-]
+from __future__ import annotations
+
+from .dialect_abc import DialectABC, parse_version
+from .mysql_dialect import MySQLDialect
+from .pgsql_dialect import PgSQLDialect
+from .sql_dialect import SQLDialect
+from .sqlite_dialect import SQLiteDialect
+
+__all__ = ["DialectABC", "MySQLDialect", "PgSQLDialect", "SQLDialect", "SQLiteDialect", "parse_version"]
