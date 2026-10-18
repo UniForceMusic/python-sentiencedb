@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Self
 
 from ..results.result import Result
 from ._introspection import index_exists
+from .helpers import column_names
 from .mixins.if_not_exists_mixin import IfNotExistsMixin
 from .mixins.where_mixin import WhereMixin
 from .query import Query
@@ -30,9 +31,9 @@ class CreateIndexQuery(IfNotExistsMixin, WhereMixin, Query):
         self._columns: tuple[str, ...] = ()
         self._unique = False
 
-    def columns(self, columns: Sequence[str]) -> Self:
-        """Replace the indexed columns."""
-        self._columns = tuple(columns)
+    def columns(self, columns: str | Sequence[str]) -> Self:
+        """Replace the indexed columns (a ``str`` is one column)."""
+        self._columns = column_names(columns)
 
         return self
 

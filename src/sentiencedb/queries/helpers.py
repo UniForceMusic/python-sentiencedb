@@ -50,6 +50,11 @@ def sub_query(select_query: Query, alias: str) -> SubQuery:
     return SubQuery(select_query, alias)
 
 
+def column_names(columns: str | Sequence[str]) -> tuple[str, ...]:
+    """One column name or several, as a tuple (a ``str`` is never split into characters)."""
+    return (columns,) if isinstance(columns, str) else tuple(columns)
+
+
 def now() -> datetime:
     """The current local date and time (PHP ``new DateTime()``)."""
     return datetime.now()

@@ -8,8 +8,8 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Self
 
-from ._ddl import column_names
 from .enums import TypeEnum
+from .helpers import column_names
 from .objects.ddl import (
     AddColumn,
     AddForeignKeyConstraint,
@@ -74,9 +74,9 @@ class AlterTableQuery:
         """``ADD PRIMARY KEY (columns)``."""
         return self._add(AddPrimaryKeys(column_names(columns)))
 
-    def add_unique_constraint(self, columns: Sequence[str], name: str | None = None) -> Self:
+    def add_unique_constraint(self, columns: str | Sequence[str], name: str | None = None) -> Self:
         """``ADD [CONSTRAINT name] UNIQUE (columns)``."""
-        return self._add(AddUniqueConstraint(tuple(columns), name))
+        return self._add(AddUniqueConstraint(column_names(columns), name))
 
     def add_foreign_key_constraint(
         self,

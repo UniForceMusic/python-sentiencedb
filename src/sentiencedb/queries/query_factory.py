@@ -29,7 +29,8 @@ class QueryFactory:
         users.insert({"name": "Alice"}).execute()
         rows = users.select(["id", "name"]).where_equals("name", "Alice").execute().fetch_dicts()
 
-    Introspection looks the table up by its unqualified name (the last part of a path).
+    Introspection covers the current schema / database only: for a schema-qualified ``["schema", "table"]`` path the
+    introspection methods raise :class:`QueryError`. An :class:`Identifier` table is looked up by its name.
     """
 
     def __init__(self, database: DatabaseABC, table: IdentifierLike) -> None:

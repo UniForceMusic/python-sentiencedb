@@ -12,6 +12,7 @@ from sentiencedb import (
     Database,
     Driver,
     Join,
+    NotNullViolationError,
     QueryError,
     SelectQuery,
     UniqueViolationError,
@@ -245,7 +246,64 @@ class TestUpsertAndReturning:
     def test_emulated_returning(self, db: Database) -> None:
         query = db.insert("users").values({"name": "Dave", "email": "d@x"}).returning(["name"]).emulate_returning("id")
 
-        assert query.execute().fetch_dicts() == [{"id": 5, "name": "Dave"}]
+        assert query.execute().fetch_dicts() == [{"name": "Dave"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_returning_an_explicit_id(self, emulate: bool, db: Database) -> None:
+        query = db.insert("users").values({"id": 100, "name": "Dave", "email": "d@x"}).returning(["id", "name"])
+
+        if emulate:
+            query.emulate_returning("id")
+
+        assert query.execute().fetch_dicts() == [{"id": 100, "name": "Dave"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_upsert_returning_finds_the_updated_row(self, emulate: bool, db: Database) -> None:
+        """``last_insert_rowid()`` still holds Eve's id after the update path."""
+        db.insert("users").values({"name": "Eve", "email": "eve@example.com"}).execute()
+        query = db.insert("users").values({"name": "Alicia", "email": "alice@example.com"})
+        query.on_conflict_do_update(["email"]).returning(["email", "name"])
+
+        if emulate:
+            query.emulate_returning("id")
+
+        assert query.execute().fetch_dicts() == [{"email": "alice@example.com", "name": "Alicia"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_do_nothing_returns_only_inserted_rows(self, emulate: bool, db: Database) -> None:
+        query = db.insert("users").values(
+            {"name": "x", "email": "bob@example.com"}, {"name": "Eve", "email": "eve@example.com"}
+        )
+        query.on_conflict_do_nothing(["email"]).returning(["name"])
+
+        if emulate:
+            query.emulate_on_conflict("id")
+
+        assert query.execute().fetch_dicts() == [{"name": "Eve"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_upsert_never_conflicts_on_null(self, emulate: bool, db: Database) -> None:
+        db.insert("users").values({"name": "first", "email": None}).execute()
+        query = db.insert("users").values({"name": "second", "email": None}).on_conflict_do_update(["email"])
+
+        if emulate:
+            query.emulate_on_conflict("id")
+
+        query.execute()
+
+        assert names(db.select("users").where_is_null("email")) == ["first", "second"]
+
+    def test_emulated_upsert_is_atomic(self, db: Database) -> None:
+        rows = [{"name": "Eve", "email": "eve@example.com"}, {"name": None, "email": "frank@example.com"}]
+
+        with pytest.raises(NotNullViolationError):
+            db.insert("users").values(*rows).on_conflict_do_update(["email"]).emulate_on_conflict("id").execute()
+
+        assert db.select("users").count() == 4
+
+    def test_emulated_upsert_rejects_empty_values(self, db: Database) -> None:
+        with pytest.raises(QueryError, match="no insert values"):
+            db.insert("users").on_conflict_do_nothing(["email"]).emulate_on_conflict("id").execute()
 
     def test_native_upsert(self, db: Database) -> None:
         row = {"name": "Alicia", "email": "alice@example.com"}
@@ -331,6 +389,27 @@ class TestDdl:
 
         assert db.select("users").count() == 4
         assert db.query("SELECT name FROM sqlite_master WHERE name = 'posts'").fetch_dict() is None
+
+    def test_emulated_exists_checks(self, db: Database) -> None:
+        """Tables and indexes of an attached schema are looked up there; identifiers are unwrapped."""
+        db.exec("ATTACH DATABASE ':memory:' AS other")
+
+        for _ in range(2):
+            db.create_table(identifier("users")).if_not_exists().emulate_if_not_exists().integer("x").execute()
+            db.create_table(["other", "users"]).if_not_exists().emulate_if_not_exists().integer("x").execute()
+            db.create_index(["other", "users"], "by_x").if_not_exists().emulate_if_not_exists().columns("x").execute()
+
+        assert db.query("SELECT name FROM other.sqlite_master ORDER BY name").fetch_dicts() == [
+            {"name": "by_x"},
+            {"name": "users"},
+        ]
+
+        for _ in range(2):
+            db.drop_index(["other", "users"], "by_x").if_exists().emulate_if_exists().execute()
+            db.drop_table(["other", "users"]).if_exists().emulate_if_exists().execute()
+
+        assert db.query("SELECT name FROM other.sqlite_master").fetch_dicts() == []
+        assert db.select("users").count() == 4
 
     def test_alter_table(self, db: Database) -> None:
         db.alter_table("users").add_varchar("nickname", 50, default="none").add_integer(

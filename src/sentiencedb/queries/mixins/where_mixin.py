@@ -131,19 +131,19 @@ class WhereMixin:
 
     def where_in(self, column: IdentifierLike, values: Sequence[Value] | SelectQuery) -> Self:
         """``column IN (values)`` or ``column IN (<select>)``; an empty list never matches."""
-        return self._add_where(Condition(ConditionEnum.IN, column, values))
+        return self._add_where(Condition(ConditionEnum.IN, column, _conditions.in_values(values)))
 
     def or_where_in(self, column: IdentifierLike, values: Sequence[Value] | SelectQuery) -> Self:
         """``OR`` twin of :meth:`where_in`."""
-        return self._add_where(Condition(ConditionEnum.IN, column, values, ChainEnum.OR))
+        return self._add_where(Condition(ConditionEnum.IN, column, _conditions.in_values(values), ChainEnum.OR))
 
     def where_not_in(self, column: IdentifierLike, values: Sequence[Value] | SelectQuery) -> Self:
         """``column NOT IN (values)``; an empty list always matches."""
-        return self._add_where(Condition(ConditionEnum.NOT_IN, column, values))
+        return self._add_where(Condition(ConditionEnum.NOT_IN, column, _conditions.in_values(values)))
 
     def or_where_not_in(self, column: IdentifierLike, values: Sequence[Value] | SelectQuery) -> Self:
         """``OR`` twin of :meth:`where_not_in`."""
-        return self._add_where(Condition(ConditionEnum.NOT_IN, column, values, ChainEnum.OR))
+        return self._add_where(Condition(ConditionEnum.NOT_IN, column, _conditions.in_values(values), ChainEnum.OR))
 
     def where_less_than(self, column: IdentifierLike, value: Value) -> Self:
         """``column < value``."""
@@ -194,7 +194,8 @@ class WhereMixin:
         return self._add_where(Condition(ConditionEnum.NOT_BETWEEN, column, (min, max), ChainEnum.OR))
 
     def where_empty(self, column: IdentifierLike) -> Self:
-        """``column`` is ``NULL``, ``0`` or ``''``."""
+        """``column`` is ``NULL``, ``0`` or ``''``. For text, numeric and boolean columns only: date and time columns
+        cannot be compared with ``'0'`` (an error on PostgreSQL, a wrong answer on MySQL)."""
         return self._add_where(_conditions.empty(column, ChainEnum.AND))
 
     def or_where_empty(self, column: IdentifierLike) -> Self:
@@ -202,7 +203,8 @@ class WhereMixin:
         return self._add_where(_conditions.empty(column, ChainEnum.OR))
 
     def where_not_empty(self, column: IdentifierLike) -> Self:
-        """``column`` is not ``NULL``, ``0`` or ``''``."""
+        """``column`` is not ``NULL``, ``0`` or ``''``; text, numeric and boolean columns only
+        (see :meth:`where_empty`)."""
         return self._add_where(_conditions.not_empty(column, ChainEnum.AND))
 
     def or_where_not_empty(self, column: IdentifierLike) -> Self:
@@ -280,11 +282,11 @@ class WhereMixin:
     def where(self, sql: str, values: Sequence[Scalar] | Mapping[str, Scalar] = ()) -> Self:
         """A raw ``(<sql>)`` condition with ``?`` placeholders and positional values, or ``:name`` placeholders
         and a mapping."""
-        return self._add_where(_conditions.raw(sql, values, ChainEnum.AND))
+        return self._add_where(_conditions.raw_condition(sql, values, ChainEnum.AND))
 
     def or_where(self, sql: str, values: Sequence[Scalar] | Mapping[str, Scalar] = ()) -> Self:
         """``OR`` twin of :meth:`where`."""
-        return self._add_where(_conditions.raw(sql, values, ChainEnum.OR))
+        return self._add_where(_conditions.raw_condition(sql, values, ChainEnum.OR))
 
     def _add_where(self, condition: ConditionNode) -> Self:
         self._where += (condition,)

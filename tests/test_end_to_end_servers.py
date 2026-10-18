@@ -303,13 +303,15 @@ class TestJoins:
             lambda join: join.on(["posts", "user_id"], ["users", "id"]).where_not_equals(["posts", "title"], "Hello"),
         )
 
-        assert query.columns([["posts", "id"]]).count() == 2
+        assert query.count() == 2
+        assert query.columns([["posts", "id"], ["users", "id"]]).count() == 2
 
     def test_sub_query_cross_and_raw_joins(self, db: Database) -> None:
-        """Joined counts select one column: MySQL rejects the duplicate ``id`` columns of ``SELECT *``."""
+        """Joined ``SELECT *`` counts work too: ``count()`` selects ``1``, as MySQL rejects the duplicate ``id``
+        columns of a derived ``SELECT *``."""
 
         def users() -> SelectQuery:
-            return db.select("users").columns([["users", "name"]])
+            return db.select("users")
 
         latest = db.select("posts").columns([alias(raw("max(id)"), "id")])
         posts = q(db, "posts")
@@ -498,7 +500,79 @@ class TestUpsertAndReturning:
     def test_emulated_returning(self, db: Database) -> None:
         query = db.insert("users").values({"name": "Dave", "email": "d@x"}).returning(["name"]).emulate_returning("id")
 
-        assert query.execute().fetch_dicts() == [{"id": 5, "name": "Dave"}]
+        assert query.execute().fetch_dicts() == [{"name": "Dave"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_returning_an_explicit_id(self, emulate: bool, db: Database) -> None:
+        """``LAST_INSERT_ID()`` / ``lastval()`` do not cover a supplied id; the row is found by its own id."""
+        query = db.insert("users").values({"id": 100, "name": "Dave", "email": "d@x"}).returning(["id", "name"])
+        query.last_insert_id("id")
+
+        if emulate:
+            query.emulate_returning("id")
+
+        assert query.execute().fetch_dicts() == [{"id": 100, "name": "Dave"}]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_upsert_returning_finds_the_updated_row(self, emulate: bool, db: Database) -> None:
+        """The update path generates no id, so the last insert id would point at another (or no) row."""
+        db.insert("users").values({"name": "Eve", "email": "eve@example.com"}).execute()
+        query = db.insert("users").values({"name": "Alicia", "email": "alice@example.com"})
+        query.on_conflict_do_update(["email"]).returning(["email", "name"]).last_insert_id("id")
+
+        if emulate:
+            query.emulate_returning("id")
+
+        assert query.execute().fetch_dicts() == [{"email": "alice@example.com", "name": "Alicia"}]
+        assert db.select("users").count() == 5
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_do_nothing_returns_only_inserted_rows(self, emulate: bool, db: Database) -> None:
+        """PostgreSQL semantics everywhere: a skipped row returns nothing, an inserted row returns itself."""
+        query = db.insert("users").values(
+            {"name": "x", "email": "bob@example.com"}, {"name": "Eve", "email": "eve@example.com"}
+        )
+        query.on_conflict_do_nothing(["email"]).returning(["name"]).last_insert_id("id")
+
+        if emulate:
+            query.emulate_on_conflict("id")
+
+        assert query.execute().fetch_dicts() == [{"name": "Eve"}]
+        assert names(db.select("users").where_equals("email", "bob@example.com")) == ["bob"]
+
+    @pytest.mark.parametrize("emulate", [False, True])
+    def test_upsert_never_conflicts_on_null(self, emulate: bool, db: Database) -> None:
+        db.insert("users").values({"name": "first", "email": None}).execute()
+        query = db.insert("users").values({"name": "second", "email": None}).on_conflict_do_update(["email"])
+
+        if emulate:
+            query.emulate_on_conflict("id")
+
+        query.execute()
+
+        assert names(db.select("users").where_is_null("email")) == ["first", "second"]
+
+    def test_emulated_upsert_is_atomic(self, db: Database) -> None:
+        rows = [{"name": "Eve", "email": "eve@example.com"}, {"name": None, "email": "frank@example.com"}]
+        query = db.insert("users").values(*rows).on_conflict_do_update(["email"]).emulate_on_conflict("id")
+
+        db.begin_transaction()
+        db.insert("posts").values({"user_id": 2, "title": "kept"}).execute()
+
+        with pytest.raises(NotNullViolationError):
+            query.execute()
+
+        db.commit_transaction()
+
+        assert db.select("users").count() == 4
+        assert db.select("posts").where_equals("title", "kept").count() == 1
+
+        with pytest.raises(QueryError, match="constraint columns"):
+            db.insert("users").values(rows[0], {"name": "Gus"}).on_conflict_do_nothing(["email"]).emulate_on_conflict(
+                "id"
+            ).execute()
+
+        assert db.select("users").count() == 4
 
     def test_native_upsert(self, db: Database) -> None:
         row = {"name": "Alicia", "email": "alice@example.com"}
@@ -542,7 +616,7 @@ class TestUpsertAndReturning:
 
         assert db.select("tags").count() == 1
 
-        with pytest.raises(QueryError, match="named constraints"):
+        with pytest.raises(QueryError, match="not the constraint name"):
             query.emulate_on_conflict("id").execute()
 
     def test_emulated_upsert(self, db: Database) -> None:
@@ -678,6 +752,46 @@ class TestDdl:
 
         assert db.select("users").count() == 4
         assert db.information_schema_tables() == ["users"]
+
+    def test_emulated_exists_checks_honour_the_schema(self, db: Database) -> None:
+        """``["schema", "table"]`` is looked up in that schema (a database on MySQL), not the current one."""
+        other = "sentiencedb_e2e_other"
+        drop = f"DROP DATABASE IF EXISTS {other}" if is_mysql(db) else f"DROP SCHEMA IF EXISTS {other} CASCADE"
+        db.exec(drop)
+        db.exec(f"CREATE DATABASE {other}" if is_mysql(db) else f"CREATE SCHEMA {other}")
+
+        def exists(table: str) -> bool:
+            sql = "SELECT count(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?"
+            return bool(db.prepared(sql, [other, table]).scalar())
+
+        try:
+            for _ in range(2):
+                db.create_table([other, "users"]).if_not_exists().emulate_if_not_exists().integer("x").execute()
+                db.create_table(identifier([other, "only"])).if_not_exists().emulate_if_not_exists().integer(
+                    "x"
+                ).execute()
+
+            assert exists("users") and exists("only")
+
+            for _ in range(2):
+                db.create_index([other, "users"], "by_x").if_not_exists().emulate_if_not_exists().columns("x").execute()
+
+            assert "by_x" not in [index.name for index in db.information_schema_indexes("users")]
+
+            for _ in range(2):
+                db.drop_index([other, "users"], "by_x").if_exists().emulate_if_exists().execute()
+                db.drop_table([other, "only"]).if_exists().emulate_if_exists().execute()
+
+            assert exists("users") and not exists("only")
+            assert db.select("users").count() == 4
+        finally:
+            db.exec(drop)
+
+    def test_emulated_exists_checks_unwrap_identifiers(self, db: Database) -> None:
+        db.create_table(identifier("users")).if_not_exists().emulate_if_not_exists().integer("x").execute()
+        db.drop_table(identifier("missing")).if_exists().emulate_if_exists().execute()
+
+        assert db.table(identifier("users")).primary_keys() == ["id"]
 
     def test_column_helpers_and_constraints(self, empty_db: Database) -> None:
         db = empty_db
@@ -990,6 +1104,7 @@ class TestThreads:
 
     def test_connection_limit(self, backend: Backend) -> None:
         with backend.connect(options={"max_connections": 1, "acquire_timeout": 0.05}) as db:
+            db.query("SELECT 1")  # the main thread now holds the only slot
             errors: list[BaseException] = []
 
             def work() -> None:

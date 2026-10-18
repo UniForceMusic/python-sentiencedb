@@ -6,11 +6,13 @@ from typing import Any
 
 import pytest
 
+from sentiencedb.driver import Driver
 from sentiencedb.exceptions import QueryError
 from sentiencedb.queries import InsertQuery
-from sentiencedb.queries.enums import ConditionEnum, OrderByDirectionEnum
-from sentiencedb.queries.objects.clauses import Condition, OnConflict, OrderBy
+from sentiencedb.queries.enums import ConditionEnum
+from sentiencedb.queries.objects.clauses import Condition, OnConflict
 from sentiencedb.queries.objects.query_with_params import QueryWithParams
+from sentiencedb.queries.objects.sql import Raw
 from sentiencedb.results.result import Result
 
 INSERT, SELECT, UPDATE = QueryWithParams("INSERT"), QueryWithParams("SELECT"), QueryWithParams("UPDATE")
@@ -19,6 +21,11 @@ INSERT, SELECT, UPDATE = QueryWithParams("INSERT"), QueryWithParams("SELECT"), Q
 @pytest.fixture
 def insert(mock_database: Any, recording_dialect: Any) -> InsertQuery:
     return InsertQuery(mock_database, recording_dialect, "users")
+
+
+@pytest.fixture(autouse=True)
+def _transactions_run_their_callback(mock_database: Any) -> None:
+    mock_database.transaction.side_effect = lambda callback, *args, **kwargs: callback(mock_database)
 
 
 @pytest.fixture
@@ -60,11 +67,11 @@ def test_values_append_rows(insert: InsertQuery, recording_dialect: Any) -> None
 @pytest.mark.parametrize(
     ("method", "args", "expected"),
     [
-        ("on_conflict_do_nothing", (["email"],), OnConflict(["email"])),
+        ("on_conflict_do_nothing", (["email"],), OnConflict(("email",))),
         ("on_conflict_do_nothing", ("users_email_key",), OnConflict("users_email_key")),
-        ("insert_ignore", (["email"],), OnConflict(["email"])),
-        ("on_conflict_do_update", (["email"],), OnConflict(["email"], {})),
-        ("on_conflict_do_update", (["email"], {"n": 1}), OnConflict(["email"], {"n": 1})),
+        ("insert_ignore", (["email"],), OnConflict(("email",))),
+        ("on_conflict_do_update", (["email"],), OnConflict(("email",), {})),
+        ("on_conflict_do_update", (["email"], {"n": 1}), OnConflict(("email",), {"n": 1})),
         ("on_duplicate_key_update", ("users_email_key",), OnConflict("users_email_key", {})),
     ],
 )
@@ -110,14 +117,18 @@ def test_native_upsert_and_returning_run_one_statement(
 
     assert insert.execute() is result
     assert _calls(recording_dialect) == ["insert"]
-    assert recording_dialect.last_call[1]["on_conflict"] == OnConflict(["email"], {})
+    assert recording_dialect.last_call[1]["on_conflict"] == OnConflict(("email",), {})
     mock_database.last_insert_id.assert_not_called()
+
+
+def _where(value: Any, column: str = "id") -> tuple[Condition, ...]:
+    return (Condition(ConditionEnum.EQUALS, column, value),)
 
 
 def test_emulated_returning_selects_the_inserted_row(
     insert: InsertQuery, mock_database: Any, legacy_dialect: Any
 ) -> None:
-    selected = Result({"id": None, "name": None}, [{"id": 7, "name": "a"}])
+    selected = Result({"name": None}, [{"name": "a"}])
     mock_database.query_with_params.side_effect = [Result(), selected]
     mock_database.last_insert_id.return_value = 7
 
@@ -126,18 +137,38 @@ def test_emulated_returning_selects_the_inserted_row(
     assert insert.execute(emulate_prepare=True) is selected
     assert _calls(legacy_dialect) == ["insert", "select"]
     select = legacy_dialect.calls[1][1]
-    assert select["columns"] == ("id", "name")
-    assert select["where"] == (Condition(ConditionEnum.EQUALS, "id", 7),)
-    assert select["order_by"] == (OrderBy("id", OrderByDirectionEnum.DESC),)
-    assert select["limit"] == 1
+    assert (select["columns"], select["where"], select["order_by"], select["limit"]) == (("name",), _where(7), (), 1)
     assert [call.args for call in mock_database.query_with_params.call_args_list] == [(INSERT, True), (SELECT, True)]
+
+
+@pytest.mark.parametrize("explicit_id", [100, "uuid-1"])
+def test_emulated_returning_selects_an_explicit_id_back(
+    explicit_id: Any, insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    """``last_insert_id()`` does not cover a row that supplies its id; the row's own value identifies it."""
+    mock_database.query_with_params.side_effect = [Result(), Result()]
+
+    insert.values({"id": explicit_id, "name": "a"}).returning(["name"]).last_insert_id("id").execute()
+
+    assert legacy_dialect.calls[1][1]["where"] == _where(explicit_id)
+    mock_database.last_insert_id.assert_not_called()
+
+
+def test_emulated_returning_falls_back_to_last_insert_id_for_a_sql_id(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    mock_database.query_with_params.side_effect = [Result(), Result()]
+    mock_database.last_insert_id.return_value = 4
+
+    insert.values({"id": Raw("nextval('s')")}).returning().last_insert_id("id").execute()
+
+    assert legacy_dialect.calls[1][1]["where"] == _where(4)
 
 
 def test_emulated_returning_inserts_several_rows_one_by_one(
     insert: InsertQuery, mock_database: Any, legacy_dialect: Any
 ) -> None:
-    """The last insert id identifies one row (on MySQL the first of a multi-row insert)."""
-    mock_database.transaction.side_effect = lambda callback, *args: callback(mock_database)
+    """The last insert id identifies a single row (on MySQL the first of a multi-row insert)."""
     mock_database.query_with_params.side_effect = [
         Result(),
         Result({"id": None}, [{"id": 1}]),
@@ -181,10 +212,23 @@ def test_emulated_returning_without_an_id_returns_the_insert_result(
 def test_returning_without_last_insert_id_cannot_be_emulated(
     insert: InsertQuery, mock_database: Any, legacy_dialect: Any
 ) -> None:
-    mock_database.query_with_params.return_value = result = Result()
+    with pytest.raises(QueryError, match="needs last_insert_id"):
+        insert.values({"name": "a"}).returning().execute()
 
-    assert insert.values({"name": "a"}).returning().execute() is result
-    mock_database.last_insert_id.assert_not_called()
+    mock_database.query_with_params.assert_not_called()
+
+
+@pytest.mark.parametrize("emulate", [False, True])
+def test_no_values_raise(emulate: bool, insert: InsertQuery, mock_database: Any) -> None:
+    insert.on_conflict_do_nothing(["email"])
+
+    if emulate:
+        insert.emulate_on_conflict("id")
+
+    with pytest.raises(QueryError, match="no insert values"):
+        insert.execute()
+
+    mock_database.query_with_params.assert_not_called()
 
 
 def test_emulated_upsert_inserts_a_missing_row(insert: InsertQuery, mock_database: Any, legacy_dialect: Any) -> None:
@@ -195,48 +239,61 @@ def test_emulated_upsert_inserts_a_missing_row(insert: InsertQuery, mock_databas
     assert (result.columns(), result.fetch_dicts()) == ({}, [])
     assert _calls(legacy_dialect) == ["select", "insert"]
     select, row_insert = legacy_dialect.calls[0][1], legacy_dialect.calls[1][1]
-    assert select["where"] == (Condition(ConditionEnum.EQUALS, "email", "a"),)
-    assert select["limit"] == 2
+    assert (select["columns"], select["where"], select["limit"]) == (("email",), _where("a", "email"), 2)
     assert row_insert["values"] == ({"email": "a", "name": "b"},)
-    assert row_insert["on_conflict"] == OnConflict(["email"], {})
+    assert row_insert["on_conflict"] is None
     assert [call.args[1] for call in mock_database.query_with_params.call_args_list] == [True, True]
+    mock_database.transaction.assert_called_once()
 
 
 @pytest.mark.parametrize(("updates", "expected"), [(None, {"email": "a", "name": "b"}), ({"name": "c"}, {"name": "c"})])
-def test_emulated_upsert_updates_an_existing_row(
+def test_emulated_upsert_updates_the_existing_row_by_its_id(
     updates: dict[str, Any] | None,
     expected: dict[str, Any],
     insert: InsertQuery,
     mock_database: Any,
     recording_dialect: Any,
 ) -> None:
-    mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 1}]), Result()]
+    mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 9}]), Result()]
 
     insert.values({"email": "a", "name": "b"}).on_conflict_do_update(["email"], updates).emulate_on_conflict("id")
     insert.execute()
 
     assert _calls(recording_dialect) == ["select", "update"]
-    assert recording_dialect.calls[0][1]["order_by"] == (OrderBy("id", OrderByDirectionEnum.DESC),)
+    assert recording_dialect.calls[0][1]["columns"] == ("id",)
     assert recording_dialect.last_call[1] == {
         "table": "users",
         "updates": expected,
-        "where": (Condition(ConditionEnum.EQUALS, "email", "a"),),
+        "where": _where(9),
         "returning": None,
     }
 
 
 def test_emulated_upsert_returns_the_updated_row(insert: InsertQuery, mock_database: Any, legacy_dialect: Any) -> None:
-    selected = Result({"id": None, "name": None}, [{"id": 1, "name": "b"}])
+    selected = Result({"name": None}, [{"name": "b"}])
     mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 1}]), Result(), selected]
 
     insert.values({"email": "a", "name": "b"}).on_conflict_do_update(["email"]).returning(["name"]).last_insert_id("id")
     result = insert.execute()
 
-    assert result.fetch_dicts() == [{"id": 1, "name": "b"}]
+    assert result.fetch_dicts() == [{"name": "b"}]
     assert _calls(legacy_dialect) == ["select", "update", "select"]
     assert legacy_dialect.calls[1][1]["returning"] is None
-    assert legacy_dialect.calls[2][1]["where"] == (Condition(ConditionEnum.EQUALS, "email", "a"),)
-    assert legacy_dialect.calls[2][1]["limit"] == 1
+    select = legacy_dialect.calls[2][1]
+    assert (select["columns"], select["where"], select["limit"]) == (("name",), _where(1), 1)
+
+
+def test_emulated_upsert_without_an_id_follows_changed_conflict_values(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    """An update that changes the conflict columns is selected back by their new values."""
+    mock_database.query_with_params.side_effect = [Result({"email": None}, [{"email": "a"}]), Result(), Result()]
+
+    insert.values({"email": "a", "name": "b"}).on_conflict_do_update(["email"], {"email": "z"}).returning(["name"])
+    insert.execute()
+
+    assert legacy_dialect.calls[1][1]["where"] == _where("a", "email")
+    assert legacy_dialect.calls[2][1]["where"] == _where("z", "email")
 
 
 @pytest.mark.parametrize(
@@ -265,8 +322,8 @@ def test_emulated_upsert_update_path_follows_update_returning(
     assert recording_dialect.calls[1][1]["returning"] == update_kwarg
 
 
-@pytest.mark.parametrize(("returning", "expected"), [(None, ({}, [])), (["id"], ({"id": "INTEGER"}, [{"id": 1}]))])
-def test_emulated_do_nothing_skips_an_existing_row(
+@pytest.mark.parametrize(("returning", "expected"), [(None, ({}, [])), (["id"], ({"id": None}, []))])
+def test_emulated_do_nothing_returns_no_row_for_a_skipped_row(
     returning: list[str] | None,
     expected: tuple[dict[str, Any], list[dict[str, Any]]],
     insert: InsertQuery,
@@ -274,7 +331,7 @@ def test_emulated_do_nothing_skips_an_existing_row(
     legacy_dialect: Any,
 ) -> None:
     mock_database.query_with_params.return_value = Result({"id": "INTEGER"}, [{"id": 1}])
-    insert.values({"email": "a"}).on_conflict_do_nothing(["email"])
+    insert.values({"email": "a"}).on_conflict_do_nothing(["email"]).last_insert_id("id")
 
     if returning is not None:
         insert.returning(returning)
@@ -292,35 +349,93 @@ def test_emulated_upsert_merges_rows_into_one_result(
         Result({"id": None}, [{"id": 1}]),
         Result({"id": None}, []),
         Result(),
-        Result({"id": None}, [{"id": 2}]),
+        Result({"id": "INTEGER"}, [{"id": 2}]),
     ]
-    mock_database.last_insert_id.return_value = 2
 
-    insert.values({"email": "a"}, {"email": "b"}).on_conflict_do_nothing(["email"]).returning(["id"]).last_insert_id(
-        "id"
-    )
-    result = insert.execute()
+    query = insert.values({"email": "a"}, {"email": "b"}).on_conflict_do_nothing(["email"]).returning(["id"])
+    result = query.last_insert_id("id").execute()
 
     assert isinstance(result, Result)
-    assert (result.columns(), result.fetch_dicts()) == ({"id": None}, [{"id": 1}, {"id": 2}])
+    assert (result.columns(), result.fetch_dicts()) == ({"id": "INTEGER"}, [{"id": 2}])
     assert _calls(legacy_dialect) == ["select", "select", "insert", "select"]
+    assert legacy_dialect.calls[3][1]["where"] == _where("b", "email")
+    mock_database.last_insert_id.assert_not_called()
+    mock_database.transaction.assert_called_once()
 
 
-def test_emulated_upsert_in_transaction(insert: InsertQuery, mock_database: Any, recording_dialect: Any) -> None:
-    mock_database.transaction.side_effect = lambda callback, *args: callback(mock_database)
-    mock_database.query_with_params.side_effect = [Result({}, []), Result()]
+def test_emulated_upsert_inserts_a_row_with_a_null_conflict_value(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    """A unique key never matches ``NULL``: the row is inserted without looking for an existing row."""
+    mock_database.query_with_params.side_effect = [Result(), Result({"id": None}, [{"id": 5}])]
+    mock_database.last_insert_id.return_value = 5
 
-    insert.values({"email": "a"}).on_conflict_do_nothing(["email"]).emulate_on_conflict("id", in_transaction=True)
+    insert.values({"email": None, "name": "x"}).on_conflict_do_update(["email"]).returning(["id"]).last_insert_id("id")
+
+    assert insert.execute().fetch_dicts() == [{"id": 5}]
+    assert _calls(legacy_dialect) == ["insert", "select"]
+    assert legacy_dialect.calls[1][1]["where"] == _where(5)
+
+
+def test_emulated_returning_routes_a_native_upsert_through_the_emulation(
+    insert: InsertQuery, mock_database: Any, recording_dialect: Any
+) -> None:
+    """A native upsert does not say which row it touched, so emulated RETURNING emulates the upsert too."""
+    mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 1}]), Result(), Result()]
+
+    insert.values({"email": "a"}).on_conflict_do_update(["email"]).returning(["email"]).emulate_returning("id")
     insert.execute()
 
-    mock_database.transaction.assert_called_once()
-    assert _calls(recording_dialect) == ["select", "insert"]
+    assert _calls(recording_dialect) == ["select", "update", "select"]
+
+
+@pytest.mark.parametrize("driver", [Driver.MYSQL, Driver.MARIADB])
+def test_mysql_do_nothing_with_returning_is_emulated(
+    driver: Driver, insert: InsertQuery, mock_database: Any, recording_dialect: Any
+) -> None:
+    """``ON DUPLICATE KEY UPDATE .. RETURNING`` would return the skipped row."""
+    recording_dialect.driver = driver
+    mock_database.query_with_params.side_effect = [Result({"id": None}, [{"id": 1}])]
+
+    result = insert.values({"email": "a"}).on_conflict_do_nothing(["email"]).returning(["id"]).execute()
+
+    assert result.fetch_dicts() == []
+    assert _calls(recording_dialect) == ["select"]
+
+
+@pytest.mark.parametrize(
+    ("driver", "on_conflict", "calls"),
+    [(Driver.SQLITE, None, ["insert"]), (Driver.MARIADB, {}, ["insert"]), (Driver.MYSQL, None, ["insert"])],
+)
+def test_other_native_upserts_stay_native(
+    driver: Driver,
+    on_conflict: dict[str, Any] | None,
+    calls: list[str],
+    insert: InsertQuery,
+    mock_database: Any,
+    recording_dialect: Any,
+) -> None:
+    recording_dialect.driver = driver
+    mock_database.query_with_params.return_value = Result()
+    insert.values({"email": "a"})
+
+    if on_conflict is None:
+        insert.on_conflict_do_nothing(["email"])
+    else:
+        insert.on_conflict_do_update(["email"], on_conflict).returning(["id"])
+
+    insert.execute()
+
+    assert _calls(recording_dialect) == calls
+    assert recording_dialect.last_call[1]["on_conflict"] is not None
+    mock_database.transaction.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("conflict", "rows", "message"),
     [
-        ("users_email_key", [], "database does not support named constraints"),
+        ("users_email_key", [], "needs conflict columns, not the constraint name 'users_email_key'"),
+        ([], [], "at least one conflict column"),
         (["email", "tenant"], [], "insert values does not contain constraint columns"),
         (["email"], [{"id": 1}, {"id": 2}], "multiple rows in constraint"),
     ],
@@ -337,3 +452,50 @@ def test_emulated_upsert_errors(
 
     with pytest.raises(QueryError, match=message):
         insert.values({"email": "a"}).on_conflict_do_update(conflict).execute()
+
+
+def test_emulated_upsert_validates_every_row_before_writing(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    insert.values({"email": "a"}, {"name": "no email"}).on_conflict_do_nothing(["email"])
+
+    with pytest.raises(QueryError, match="constraint columns"):
+        insert.execute()
+
+    mock_database.query_with_params.assert_not_called()
+
+
+def test_emulated_upsert_needs_an_id_for_null_conflict_rows_with_returning(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    insert.values({"email": "a"}, {"email": None}).on_conflict_do_nothing(["email"]).returning()
+
+    with pytest.raises(QueryError, match="needs last_insert_id"):
+        insert.execute()
+
+    mock_database.query_with_params.assert_not_called()
+
+
+def test_emulated_upsert_finds_rows_by_conflict_columns_without_an_id(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    mock_database.query_with_params.side_effect = [Result(), Result(), Result({"name": None}, [{"name": "n"}])]
+
+    result = insert.values({"email": "a", "name": "n"}).on_conflict_do_nothing(["email"]).returning(["name"]).execute()
+
+    assert result.fetch_dicts() == [{"name": "n"}]
+    assert legacy_dialect.calls[2][1]["where"] == _where("a", "email")
+
+
+def test_builders_copy_the_callers_containers(insert: InsertQuery, recording_dialect: Any) -> None:
+    row: dict[str, Any] = {"email": "a"}
+    conflict = ["email"]
+    updates: dict[str, Any] = {"name": "b"}
+    insert.values(row).on_conflict_do_update(conflict, updates)
+    row["email"], updates["name"] = "changed", "changed"
+    conflict.append("changed")
+
+    kwargs = _kwargs(insert, recording_dialect)
+
+    assert kwargs["values"] == ({"email": "a"},)
+    assert kwargs["on_conflict"] == OnConflict(("email",), {"name": "b"})

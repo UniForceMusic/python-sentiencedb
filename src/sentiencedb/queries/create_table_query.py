@@ -9,9 +9,9 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Self
 
 from ..results.result import Result
-from ._ddl import column_names
 from ._introspection import table_exists
 from .enums import TypeEnum
+from .helpers import column_names
 from .mixins.if_not_exists_mixin import IfNotExistsMixin
 from .objects.ddl import Column, ForeignKeyConstraint, Type, UniqueConstraint
 from .objects.sql import Raw
@@ -109,9 +109,9 @@ class CreateTableQuery(IfNotExistsMixin, Query):
 
         return self
 
-    def unique_constraint(self, columns: Sequence[str], name: str | None = None) -> Self:
+    def unique_constraint(self, columns: str | Sequence[str], name: str | None = None) -> Self:
         """Add ``[CONSTRAINT name] UNIQUE (columns)``."""
-        self._constraints += (UniqueConstraint(tuple(columns), name),)
+        self._constraints += (UniqueConstraint(column_names(columns), name),)
 
         return self
 

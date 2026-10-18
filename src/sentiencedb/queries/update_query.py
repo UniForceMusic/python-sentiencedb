@@ -26,7 +26,7 @@ class UpdateQuery(ReturningMixin, WhereMixin, Query):
 
     def set(self, updates: Mapping[str, Value]) -> Self:
         """Replace the column -> value updates; a value may be a :class:`Sql` or a sub-select."""
-        self._updates = updates
+        self._updates = dict(updates)
 
         return self
 

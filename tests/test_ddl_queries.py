@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from sentiencedb.exceptions import QueryError
 from sentiencedb.queries import (
     AlterTableQuery,
     CreateIndexQuery,
@@ -16,6 +17,7 @@ from sentiencedb.queries import (
     DropTableQuery,
 )
 from sentiencedb.queries.enums import ConditionEnum, ReferentialActionEnum, TypeEnum
+from sentiencedb.queries.helpers import identifier
 from sentiencedb.queries.objects.clauses import Condition
 from sentiencedb.queries.objects.ddl import (
     AddColumn,
@@ -27,7 +29,6 @@ from sentiencedb.queries.objects.ddl import (
     DropColumn,
     DropConstraint,
     ForeignKeyConstraint,
-    Index,
     RenameColumn,
     Type,
     UniqueConstraint,
@@ -44,6 +45,15 @@ def legacy_dialect(recording_dialect: Any, monkeypatch: pytest.MonkeyPatch) -> A
         monkeypatch.setattr(type(recording_dialect), feature, property(lambda self: False))
 
     return recording_dialect
+
+
+def _exists(mock_database: Any, exists: bool) -> None:
+    """Make the catalog query of an emulated ``IF [NOT] EXISTS`` find the object, or not."""
+    mock_database.prepared.return_value = Result({"1": None}, [{"1": 1}] if exists else [])
+
+
+def _catalog_params(mock_database: Any) -> list[Any]:
+    return list(mock_database.prepared.call_args.args[1])
 
 
 # -- CREATE TABLE ----------------------------------------------------------------------------------------------
@@ -144,35 +154,64 @@ def test_create_table_native(if_not_exists: bool, mock_database: Any, recording_
     assert query.execute(True) is result
     assert recording_dialect.last_call[1]["if_not_exists"] is if_not_exists
     mock_database.query_with_params.assert_called_once_with(QueryWithParams("CREATE_TABLE"), True)
-    mock_database.information_schema_tables.assert_not_called()
+    mock_database.prepared.assert_not_called()
 
 
-@pytest.mark.parametrize(("tables", "executed"), [(["t", "other"], False), (["other"], True)])
-def test_create_table_emulated(tables: list[str], executed: bool, mock_database: Any, recording_dialect: Any) -> None:
-    mock_database.information_schema_tables.return_value = tables
+@pytest.mark.parametrize("exists", [True, False])
+def test_create_table_emulated(exists: bool, mock_database: Any, recording_dialect: Any) -> None:
+    _exists(mock_database, exists)
     mock_database.query_with_params.return_value = Result()
 
-    query = CreateTableQuery(mock_database, recording_dialect, ["app", "t"]).varchar("a").if_not_exists()
+    query = CreateTableQuery(mock_database, recording_dialect, "t").varchar("a").if_not_exists()
     result = query.emulate_if_not_exists().execute()
 
     assert result.columns() == {}
-    assert mock_database.query_with_params.called is executed
-    assert [kwargs["if_not_exists"] for _, kwargs in recording_dialect.calls] == [False] * executed
+    assert mock_database.query_with_params.called is not exists
+    assert [kwargs["if_not_exists"] for _, kwargs in recording_dialect.calls] == [False] * (not exists)
+    assert mock_database.prepared.call_args.args == (
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ["t"],
+    )
 
 
-def test_create_table_emulated_when_unsupported(mock_database: Any, legacy_dialect: Any) -> None:
-    mock_database.information_schema_tables.return_value = ["t"]
+@pytest.mark.parametrize(
+    ("table", "sql", "params"),
+    [
+        (["app", "t"], 'SELECT 1 FROM "app"."sqlite_master" WHERE type = \'table\' AND name = ?', ["t"]),
+        (Raw("t"), "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", ["t"]),
+        (identifier("t"), "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", ["t"]),
+        (identifier(["app", "t"]), 'SELECT 1 FROM "app"."sqlite_master" WHERE type = \'table\' AND name = ?', ["t"]),
+    ],
+)
+def test_create_table_emulated_looks_up_qualified_and_sql_tables(
+    table: Any, sql: str, params: list[Any], mock_database: Any, legacy_dialect: Any
+) -> None:
+    _exists(mock_database, True)
 
-    CreateTableQuery(mock_database, legacy_dialect, Raw("t")).varchar("a").if_not_exists().execute()
+    CreateTableQuery(mock_database, legacy_dialect, table).varchar("a").if_not_exists().execute()
 
     mock_database.query_with_params.assert_not_called()
+    assert mock_database.prepared.call_args.args == (sql, params)
+
+
+def test_emulated_exists_rejects_a_three_part_path(mock_database: Any, legacy_dialect: Any) -> None:
+    with pytest.raises(QueryError, match="expected \\[schema, table\\]"):
+        CreateTableQuery(mock_database, legacy_dialect, ["db", "app", "t"]).varchar("a").if_not_exists().execute()
 
 
 def test_emulate_if_not_exists_alone_does_nothing(mock_database: Any, recording_dialect: Any) -> None:
     CreateTableQuery(mock_database, recording_dialect, "t").varchar("a").emulate_if_not_exists().execute()
 
-    mock_database.information_schema_tables.assert_not_called()
+    mock_database.prepared.assert_not_called()
     mock_database.query_with_params.assert_called_once()
+
+
+def test_unique_constraints_accept_one_column(mock_database: Any, recording_dialect: Any) -> None:
+    CreateTableQuery(mock_database, recording_dialect, "t").unique_constraint("email").to_query_with_params()
+    AlterTableQuery(mock_database, recording_dialect, "t").add_unique_constraint("email").to_query_with_params()
+
+    assert recording_dialect.calls[0][1]["constraints"] == (UniqueConstraint(("email",)),)
+    assert recording_dialect.calls[1][1]["alters"] == (AddUniqueConstraint(("email",)),)
 
 
 # -- ALTER TABLE -----------------------------------------------------------------------------------------------
@@ -252,20 +291,21 @@ def test_drop_table(mock_database: Any, recording_dialect: Any) -> None:
 
     assert query.if_exists().execute(True) is result
     assert recording_dialect.last_call == ("drop_table", {"table": "t", "if_exists": True})
-    mock_database.information_schema_tables.assert_not_called()
+    mock_database.prepared.assert_not_called()
 
 
-@pytest.mark.parametrize(("tables", "executed"), [(["t"], True), (["other"], False)])
-def test_drop_table_emulated(tables: list[str], executed: bool, mock_database: Any, legacy_dialect: Any) -> None:
-    mock_database.information_schema_tables.return_value = tables
+@pytest.mark.parametrize("exists", [True, False])
+def test_drop_table_emulated(exists: bool, mock_database: Any, legacy_dialect: Any) -> None:
+    _exists(mock_database, exists)
 
     DropTableQuery(mock_database, legacy_dialect, ["app", "t"]).if_exists().execute()
 
-    assert mock_database.query_with_params.called is executed
+    assert mock_database.query_with_params.called is exists
+    assert _catalog_params(mock_database) == ["t"]
 
 
 def test_drop_table_emulate_if_exists_overrides_native(mock_database: Any, recording_dialect: Any) -> None:
-    mock_database.information_schema_tables.return_value = []
+    _exists(mock_database, False)
 
     query = DropTableQuery(mock_database, recording_dialect, "t").if_exists().emulate_if_exists()
 
@@ -302,44 +342,66 @@ def test_create_index(mock_database: Any, recording_dialect: Any) -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("indexes", "executed"),
-    [
-        ({"t": [], "other": [Index("ix", ["a"])]}, False),
-        ({"t": [Index("ix", ["a"], unique=True)], "other": []}, False),
-        ({"t": [Index("ix_other", ["a"])], "other": []}, True),
-    ],
-)
-def test_create_index_emulated(
-    indexes: dict[str, list[Index]], executed: bool, mock_database: Any, legacy_dialect: Any
-) -> None:
-    mock_database.information_schema_tables.return_value = ["other", "t"]
-    mock_database.information_schema_indexes.side_effect = lambda table: indexes[table]
+@pytest.mark.parametrize("exists", [True, False])
+def test_create_index_emulated_is_one_catalog_query(exists: bool, mock_database: Any, legacy_dialect: Any) -> None:
+    """SQLite index names are unique per database: the name alone is looked up, whatever the table."""
+    _exists(mock_database, exists)
 
-    query = CreateIndexQuery(mock_database, legacy_dialect, ["app", "t"], "ix").columns(["a"]).if_not_exists()
+    query = CreateIndexQuery(mock_database, legacy_dialect, "t", "ix").columns("a").if_not_exists()
     query.execute()
 
-    assert mock_database.query_with_params.called is executed
-    assert mock_database.information_schema_indexes.call_args_list[0].args == ("t",)
+    assert mock_database.query_with_params.called is not exists
+    assert mock_database.prepared.call_args.args == (
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ["ix"],
+    )
+    assert mock_database.prepared.call_count == 1
+    assert [kwargs["columns"] for _, kwargs in legacy_dialect.calls] == [("a",)] * (not exists)
+
+
+@pytest.mark.parametrize(
+    ("table", "sql_end", "params"),
+    [
+        ("t", "schemaname = current_schema()", ["ix"]),
+        (["app", "t"], "schemaname = ?", ["ix", "app"]),
+    ],
+)
+def test_pgsql_index_names_are_per_schema(
+    table: Any, sql_end: str, params: list[Any], mock_database: Any, pgsql_dialect: Any
+) -> None:
+    _exists(mock_database, False)
+
+    DropIndexQuery(mock_database, pgsql_dialect, table, "ix").if_exists().emulate_if_exists().execute()
+
+    sql, bound = mock_database.prepared.call_args.args
+    assert sql.startswith("SELECT 1 FROM pg_catalog.pg_indexes WHERE indexname = ?")
+    assert (sql.endswith(sql_end), bound) == (True, params)
+    mock_database.query_with_params.assert_not_called()
 
 
 @pytest.mark.parametrize("create", [True, False])
 def test_mysql_index_names_are_per_table(create: bool, mock_database: Any, mysql_dialect: Any) -> None:
     """An index of the same name on another table neither blocks ``CREATE`` nor satisfies ``DROP``."""
-    mock_database.information_schema_indexes.side_effect = lambda table: [Index("ix", ["a"])] * (table == "other")
+    _exists(mock_database, False)
     query = CreateIndexQuery(mock_database, mysql_dialect, "t", "ix").columns(["a"]).if_not_exists()
 
-    (query if create else DropIndexQuery(mock_database, mysql_dialect, "t", "ix").if_exists()).execute()
+    (
+        query.emulate_if_not_exists()
+        if create
+        else DropIndexQuery(mock_database, mysql_dialect, "t", "ix").if_exists().emulate_if_exists()
+    ).execute()
 
     assert mock_database.query_with_params.called is create
-    mock_database.information_schema_tables.assert_not_called()
-    mock_database.information_schema_indexes.assert_called_once_with("t")
+    sql, params = mock_database.prepared.call_args.args
+    assert "information_schema.statistics WHERE table_name = ? AND index_name = ?" in sql
+    assert "table_schema = DATABASE()" in sql
+    assert params == ["t", "ix"]
 
 
 def test_create_index_native(mock_database: Any, recording_dialect: Any) -> None:
     CreateIndexQuery(mock_database, recording_dialect, "t", "ix").columns(["a"]).if_not_exists().execute()
 
-    mock_database.information_schema_indexes.assert_not_called()
+    mock_database.prepared.assert_not_called()
     mock_database.query_with_params.assert_called_once_with(QueryWithParams("CREATE_INDEX"), False)
 
 
@@ -351,13 +413,12 @@ def test_drop_index(mock_database: Any, recording_dialect: Any) -> None:
 
     query.if_exists().execute()
     assert recording_dialect.last_call == ("drop_index", {"table": "t", "name": "ix", "if_exists": True})
-    mock_database.information_schema_indexes.assert_not_called()
+    mock_database.prepared.assert_not_called()
 
 
-@pytest.mark.parametrize(("indexes", "executed"), [([Index("ix", ["a"])], True), ([], False)])
-def test_drop_index_emulated(indexes: list[Index], executed: bool, mock_database: Any, recording_dialect: Any) -> None:
-    mock_database.information_schema_tables.return_value = ["t"]
-    mock_database.information_schema_indexes.return_value = indexes
+@pytest.mark.parametrize("executed", [True, False])
+def test_drop_index_emulated(executed: bool, mock_database: Any, recording_dialect: Any) -> None:
+    _exists(mock_database, executed)
 
     DropIndexQuery(mock_database, recording_dialect, "t", "ix").if_exists().emulate_if_exists().execute()
 

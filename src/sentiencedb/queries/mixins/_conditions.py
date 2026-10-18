@@ -10,10 +10,11 @@ from ..helpers import escape_backslash
 from ..objects.clauses import Condition, ConditionGroup
 from ..objects.query_with_params import QueryWithParams
 from ..objects.sql import Expression
+from ..query import Query
 
 if TYPE_CHECKING:
     from ..objects.condition_groups import HavingGroup, WhereGroup
-    from ..type_aliases import IdentifierLike, Scalar
+    from ..type_aliases import IdentifierLike, Scalar, Value
 
 _GroupT = TypeVar("_GroupT", "WhereGroup", "HavingGroup")
 
@@ -53,7 +54,12 @@ def not_empty(column: IdentifierLike, chain: ChainEnum) -> ConditionGroup:
     )
 
 
-def raw(sql: str, values: Sequence[Scalar] | Mapping[str, Scalar], chain: ChainEnum) -> Condition:
+def in_values(values: Sequence[Value] | Query) -> tuple[Value, ...] | Query:
+    """The values of ``IN``, copied so that later changes to the caller's list do not leak into the query."""
+    return values if isinstance(values, Query) else tuple(values)
+
+
+def raw_condition(sql: str, values: Sequence[Scalar] | Mapping[str, Scalar], chain: ChainEnum) -> Condition:
     """A raw ``(<sql>)`` condition; ``:name`` placeholders are rewritten to ``?``."""
     query_with_params = QueryWithParams(sql, values).named_params_to_question_marks()
 
@@ -63,9 +69,9 @@ def raw(sql: str, values: Sequence[Scalar] | Mapping[str, Scalar], chain: ChainE
 
 
 def group(
-    group: _GroupT, callback: Callable[[_GroupT], _GroupT | None], chain: ChainEnum, negate: bool
+    empty_group: _GroupT, callback: Callable[[_GroupT], _GroupT | None], chain: ChainEnum, negate: bool
 ) -> ConditionGroup | None:
-    """Let ``callback`` fill ``group`` (or return a replacement); ``None`` when it ends up empty."""
-    conditions = (callback(group) or group).conditions
+    """Let ``callback`` fill ``empty_group`` (or return a replacement); ``None`` when it ends up empty."""
+    conditions = (callback(empty_group) or empty_group).conditions
 
     return ConditionGroup(conditions, chain, negate) if conditions else None

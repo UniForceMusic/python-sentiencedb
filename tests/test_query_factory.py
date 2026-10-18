@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from sentiencedb.exceptions import QueryError
 from sentiencedb.queries import (
     AlterTableQuery,
     CreateIndexQuery,
@@ -18,6 +19,7 @@ from sentiencedb.queries import (
     SelectQuery,
     UpdateQuery,
 )
+from sentiencedb.queries.helpers import identifier
 from sentiencedb.queries.objects.alias import Alias
 from sentiencedb.queries.objects.sql import Raw
 from sentiencedb.queries.type_aliases import IdentifierLike
@@ -104,11 +106,23 @@ def test_index_builders(method: str, builder: type[Any], factory: QueryFactory, 
     "method", ["columns", "primary_keys", "unique_constraints", "foreign_key_constraints", "indexes"]
 )
 @pytest.mark.parametrize(
-    ("table", "name"), [("users", "users"), (["app", "users"], "users"), (["app", Raw("users")], "users")]
+    "table", ["users", ["users"], [Raw("users")], identifier("users"), identifier(["users"]), Raw("users")]
 )
-def test_introspection_uses_the_table_name(method: str, table: IdentifierLike, name: str, database: Any) -> None:
+def test_introspection_uses_the_table_name(method: str, table: IdentifierLike, database: Any) -> None:
     introspect = getattr(database, f"information_schema_{method}")
     introspect.return_value = sentinel = [object()]
 
     assert getattr(QueryFactory(database, table), method)() is sentinel
-    introspect.assert_called_once_with(name)
+    introspect.assert_called_once_with("users")
+
+
+@pytest.mark.parametrize(
+    "method", ["columns", "primary_keys", "unique_constraints", "foreign_key_constraints", "indexes"]
+)
+@pytest.mark.parametrize("table", [["app", "users"], identifier(["app", "users"]), ["a", "b", "users"]])
+def test_introspection_rejects_schema_qualified_tables(method: str, table: IdentifierLike, database: Any) -> None:
+    """Introspection only covers the current schema; looking up ``users`` there would describe another table."""
+    with pytest.raises(QueryError):
+        getattr(QueryFactory(database, table), method)()
+
+    getattr(database, f"information_schema_{method}").assert_not_called()

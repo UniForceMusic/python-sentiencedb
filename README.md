@@ -420,7 +420,7 @@ any `Sql`. `db.select_table(table, alias=None)` and `db.select_sub_query(select_
 | `limit(limit)` | `LIMIT`; a negative number removes it. |
 | `offset(offset)` | `OFFSET`; only emitted together with a limit. |
 | `union(select_query)` / `union_all(select_query)` | Append a `UNION [ALL]`. |
-| `count(emulate_prepare=False) -> int` | Run `SELECT count(*) FROM (<this select>) AS "count"`. |
+| `count(emulate_prepare=False) -> int` | Run `SELECT count(*) FROM (<this select>) AS "count"`. The inner select lists `1` where its columns cannot change the row count (no `DISTINCT`, `UNION`, `HAVING` or ungrouped SQL expressions), so a joined `SELECT *` also counts on MySQL. |
 
 ```python
 from sentiencedb import sub_query
@@ -575,7 +575,7 @@ print(raw_join.count())  # 3
 | `on_conflict_do_nothing(conflict)` | Skip rows that conflict. Alias: `insert_ignore`. |
 | `on_conflict_do_update(conflict, updates=None)` | Update the conflicting row with `updates`; without `updates` every inserted column is overwritten with its new value. Alias: `on_duplicate_key_update`. |
 | `last_insert_id(column)` | Name the auto increment column (needed by MySQL upserts and `RETURNING` emulation). |
-| `emulate_on_conflict(last_insert_id, in_transaction=False)` | Emulate the upsert even where it is supported natively. |
+| `emulate_on_conflict(last_insert_id)` | Emulate the upsert even where it is supported natively. (`in_transaction` is still accepted and ignored: the emulation always runs in a transaction.) |
 
 `conflict` is a list of the unique columns, or a constraint name as a string (PostgreSQL only; SQLite raises
 `QueryError`, MySQL ignores the target because `ON DUPLICATE KEY UPDATE` reacts to every unique key).
@@ -612,17 +612,25 @@ Refer to columns of the existing row qualified with the table name (`identifier(
 unqualified column in `DO UPDATE SET` is ambiguous on PostgreSQL.
 
 **Emulation.** On engines without native upserts, or after `emulate_on_conflict(...)`, `execute()` handles each row
-separately: it selects the existing row by the conflict columns and then inserts, updates or skips it. This needs a
-list of conflict columns that every row contains (otherwise `QueryError`) and raises `QueryError` when more than one
-existing row matches. Pass `in_transaction=True` to run the statements in a transaction. Emulation is not safe
-against concurrent writers.
+separately: it selects the existing row by the conflict columns and then inserts, updates or skips it. A row with a
+`NULL` conflict value is always inserted, because a unique key never matches `NULL`. Every row is validated before any
+statement runs: the emulation needs a list of conflict columns that every row contains, and at least one row
+(otherwise `QueryError`). It raises `QueryError` when more than one existing row matches. All statements run inside
+`db.transaction()`, which becomes a savepoint inside an open transaction, so a failing row leaves no partial writes.
+The emulation is still not safe against concurrent writers: a row another connection inserts between the select and
+the insert raises `UniqueViolationError`. `updates` must be valid in a plain `UPDATE`: `excluded.c` and `values(c)`
+only work natively.
+
+When `RETURNING` has to be emulated (see below), an upsert is emulated as well, because a native upsert does not say
+which row it touched. The same goes for `on_conflict_do_nothing` with `returning()` on MySQL and MariaDB, where
+`ON DUPLICATE KEY UPDATE ... RETURNING` would return the skipped row.
 
 ```python
 emulated = (
     db.insert("users")
     .values({"name": "Carol", "email": "carol@example.com", "age": 45}, {"name": "Bob B.", "email": "bob@example.com"})
     .on_conflict_do_update(["email"])
-    .emulate_on_conflict("id", in_transaction=True)
+    .emulate_on_conflict("id")
     .returning(["id", "name"])
 )
 print(emulated.execute().fetch_dicts())  # [{'id': 6, 'name': 'Carol'}, {'id': 2, 'name': 'Bob B.'}]
@@ -635,6 +643,10 @@ print(emulated.execute().fetch_dicts())  # [{'id': 6, 'name': 'Carol'}, {'id': 2
 `returning(columns=())` on `InsertQuery`, `UpdateQuery` and `DeleteQuery` returns the affected rows; no columns means
 `RETURNING *`.
 
+An `INSERT` behaves the same on every engine and path, native or emulated, following PostgreSQL: rows the statement
+inserted or updated come back with exactly the requested columns, and a row skipped by `on_conflict_do_nothing`
+returns nothing.
+
 | Engine | `INSERT` | `UPDATE` | `DELETE` |
 |---|---|---|---|
 | PostgreSQL 8.2+ | native | native | native |
@@ -643,11 +655,12 @@ print(emulated.execute().fetch_dicts())  # [{'id': 6, 'name': 'Carol'}, {'id': 2
 | MySQL, older MariaDB | emulated | `QueryError` | `QueryError` |
 
 **INSERT emulation.** Where `RETURNING` is not supported, or after `emulate_returning(last_insert_id)`, the insert
-runs without it and the row is then selected back by the auto increment column:
-`SELECT <columns> FROM table WHERE id = <last insert id> ORDER BY id DESC LIMIT 1`. This requires the column name,
-through `last_insert_id("id")` or `emulate_returning("id")`; without it the result is empty. A multi-row insert is
-then run as one insert (and select) per row, inside a transaction, so every row comes back. An emulated upsert
-returns the inserted, updated or (for "do nothing") existing row per input row.
+runs without it and each row is then selected back with `SELECT <columns> FROM table WHERE ... LIMIT 1`. The row is
+found by the value it supplies for the `last_insert_id` column, or, in an upsert, by its conflict columns, or else by
+the id the database generated (`db.last_insert_id()`). An updated row is found by its id. The column name comes from
+`last_insert_id("id")` or `emulate_returning("id")`. A plain insert without it raises `QueryError`, because nothing
+identifies the new row. A multi-row insert is then run as one insert (and select) per row, inside a transaction, so
+every row comes back.
 
 **UPDATE and DELETE** are not emulated: where the engine lacks `RETURNING`, `returning()` raises `QueryError`.
 

@@ -95,16 +95,31 @@ def test_table_may_be_an_alias_or_sub_query(mock_database: Any, recording_dialec
 
 def test_columns_mapping_aliases_by_key(select: SelectQuery, recording_dialect: Any, mock_database: Any) -> None:
     sub_select = SelectQuery(mock_database, recording_dialect, "orders")
-    kept = Alias("email", "mail")
-
-    select.columns({"n": "name", "q": ["users", "id"], "orders": sub_select, "ignored": kept})
+    select.columns(
+        {
+            "n": "name",
+            "q": ["users", "id"],
+            "orders": sub_select,
+            "mail": Alias("email", "ignored"),
+            "latest": SubQuery(sub_select, "ignored"),
+        }
+    )
 
     assert _kwargs(select, recording_dialect)["columns"] == (
         Alias("name", "n"),
         Alias(["users", "id"], "q"),
         SubQuery(sub_select, "orders"),
-        kept,
+        Alias("email", "mail"),
+        SubQuery(sub_select, "latest"),
     )
+
+
+def test_a_str_is_one_column(select: SelectQuery, recording_dialect: Any) -> None:
+    select.columns("email").group_by("email").distinct("email")
+
+    kwargs = _kwargs(select, recording_dialect)
+
+    assert (kwargs["columns"], kwargs["group_by"], kwargs["distinct"]) == (("email",), ("email",), ("email",))
 
 
 def test_columns_and_group_by_replace(select: SelectQuery, recording_dialect: Any) -> None:
@@ -153,6 +168,71 @@ def test_count(
 
     method, kwargs = recording_dialect.last_call
     assert method == "select"
-    assert kwargs["table"] == SubQuery(select, "count")
+    assert kwargs["table"].alias == "count"
     assert kwargs["columns"] == (Raw("count(*)"),)
     mock_database.query_with_params.assert_called_once_with(QueryWithParams("SELECT"), True)
+
+
+def _counted(select: SelectQuery, recording_dialect: Any, mock_database: Any) -> dict[str, Any]:
+    """The keyword arguments the inner select of ``select.count()`` hands to the dialect."""
+    mock_database.query_with_params.return_value = Result({"count(*)": None}, [{"count(*)": 1}])
+    select.count()
+    inner = recording_dialect.last_call[1]["table"].select_query
+    inner.to_query_with_params()
+
+    return dict(recording_dialect.last_call[1])
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda s: s,
+        lambda s: s.columns([["users", "id"], ["posts", "id"]]),
+        lambda s: s.columns({"n": "name"}),
+        lambda s: s.columns([Raw("count(*)")]).group_by(["name"]),
+        lambda s: s.order_by_asc("name"),
+    ],
+)
+def test_count_selects_one_where_the_select_list_cannot_change_the_rows(
+    build: Any, select: SelectQuery, recording_dialect: Any, mock_database: Any
+) -> None:
+    """MySQL rejects a derived table with duplicate column names, which a joined ``SELECT *`` produces."""
+    kwargs = _counted(build(select), recording_dialect, mock_database)
+
+    assert kwargs["columns"] == (Raw("1"),)
+    assert kwargs["order_by"] == ()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda s: s.columns(["name"]).distinct(),
+        lambda s: s.columns(["name"]).union(s.__class__(s._database, s._dialect, "other")),
+        lambda s: s.columns(["name"]).group_by(["name"]).having_equals("name", "a"),
+        lambda s: s.columns([Raw("max(id)")]),
+        lambda s: s.columns({"n": "name"}).order_by_asc("n").limit(2),
+    ],
+)
+def test_count_keeps_a_select_list_that_decides_the_rows(
+    build: Any, select: SelectQuery, recording_dialect: Any, mock_database: Any
+) -> None:
+    query = build(select)
+    columns = query._columns
+
+    assert _counted(query, recording_dialect, mock_database)["columns"] == columns
+
+
+def test_count_keeps_order_by_with_a_limit(select: SelectQuery, recording_dialect: Any, mock_database: Any) -> None:
+    kwargs = _counted(select.order_by_desc("id").limit(3), recording_dialect, mock_database)
+
+    assert (kwargs["columns"], kwargs["limit"]) == ((), 3)
+    assert len(kwargs["order_by"]) == 1
+
+
+def test_count_leaves_the_query_unchanged(select: SelectQuery, recording_dialect: Any, mock_database: Any) -> None:
+    select.columns(["name"]).order_by_asc("name")
+    _counted(select, recording_dialect, mock_database)
+
+    kwargs = _kwargs(select, recording_dialect)
+
+    assert (kwargs["columns"], len(kwargs["order_by"])) == (("name",), 1)
