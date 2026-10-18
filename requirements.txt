@@ -1,17 +1,3 @@
-ast_serialize==0.6.0
-iniconfig==2.3.0
-librt==0.13.0
-mypy==2.3.0
-mypy_extensions==1.1.0
-packaging==26.2
-pathspec==1.1.1
-pluggy==1.6.0
-mysql-connector-python==9.7.0
-psycopg==3.3.4
-psycopg-binary==3.3.4
--e git+https://github.com/UniForceMusic/python-sentiencedb.git@516f8543c53d4bac05940fa78799d58fa1f9f313#egg=sentiencedb
-Pygments==2.20.0
-pytest==9.1.1
-ruff==0.16.0
-setuptools==83.0.0
-typing_extensions==4.16.0
+# Development install: the package in editable mode with every driver and the dev tools.
+# Dependencies are declared in pyproject.toml; this file only exists for `pip install -r requirements.txt`.
+-e .[postgres,mysql,dev]

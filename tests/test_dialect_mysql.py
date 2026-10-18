@@ -1,385 +1,314 @@
+"""MySQL and MariaDB statement generation."""
+
 from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime
 
 import pytest
 
-from sentiencedb._query_with_params import QueryWithParams
-from sentiencedb.dialects.mysql import MySQLDialect
-from sentiencedb.exceptions import QueryError
-from sentiencedb.query._condition import Condition
-from sentiencedb.query._on_conflict import OnConflict
-from sentiencedb.query.enums.condition import ConditionEnum
-from sentiencedb.query.enums.type import TypeEnum
+from sentiencedb import Driver, QueryError
+from sentiencedb.dialects import MySQLDialect
+from sentiencedb.options import Options
+from sentiencedb.queries.enums import ConditionEnum, JoinEnum, TypeEnum
+from sentiencedb.queries.objects import (
+    AddColumn,
+    AddPrimaryKeys,
+    AlterColumn,
+    Column,
+    Condition,
+    ConditionNode,
+    CurrentTimestamp,
+    DropConstraint,
+    JoinClause,
+    OnConflict,
+    QueryWithParams,
+    Raw,
+    SubQuery,
+    Type,
+)
+from sentiencedb.queries.query import Query
+from sentiencedb.queries.type_aliases import Scalar
+
+StaticQuery = Callable[..., Query]
 
 
-def test_mysql_select(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect.select(
-        distinct=None,
-        columns=["id", "name"],
-        table="users",
-        joins=None,
-        where=None,
-        group_by=None,
-        having=None,
-        order_by=None,
-        limit=None,
-        offset=None,
-        unions=None,
+def where(dialect: MySQLDialect, *conditions: ConditionNode) -> tuple[str, list[Scalar]]:
+    query_with_params = dialect.select(table="t", where=conditions)
+
+    return query_with_params.query.split(" WHERE ", 1)[1], list(query_with_params.params)
+
+
+def mysql(version: str, options: Options | None = None) -> MySQLDialect:
+    return MySQLDialect(Driver.MYSQL, version, options)
+
+
+def mariadb(version: str) -> MySQLDialect:
+    return MySQLDialect(Driver.MARIADB, version)
+
+
+class TestEscaping:
+    def test_identifiers_double_the_backtick(self, mysql_dialect: MySQLDialect) -> None:
+        """PHP escaped a backtick inside an identifier as ``\\```, which MySQL rejects (bug A2)."""
+        assert mysql_dialect.select(table="we`ird", columns=["a\\b"]).query == "SELECT `a\\b` FROM `we``ird`"
+
+    def test_string_literals_double_quotes_and_escape_backslashes(self, mysql_dialect: MySQLDialect) -> None:
+        """A doubled quote cannot end the literal early, even under ``NO_BACKSLASH_ESCAPES``."""
+        query_with_params = mysql_dialect.create_table(
+            table="t", columns=[Column("a", Type(TypeEnum.VARCHAR), default='it\'s "x"\\')]
+        )
+
+        assert query_with_params.query == "CREATE TABLE `t` (`a` VARCHAR(255) DEFAULT 'it''s \"x\"\\\\')"
+        assert QueryWithParams("SELECT ?", [True]).to_sql(mysql_dialect) == "SELECT 1"
+
+
+class TestConditions:
+    def test_like_binary_when_case_sensitive(self, mysql_dialect: MySQLDialect) -> None:
+        assert where(mysql_dialect, Condition(ConditionEnum.LIKE, "c", "a%")) == ("`c` LIKE BINARY ?", ["a%"])
+        assert where(mysql_dialect, Condition(ConditionEnum.NOT_LIKE, "c", "a%")) == ("`c` NOT LIKE BINARY ?", ["a%"])
+        assert where(mysql_dialect, Condition(ConditionEnum.LIKE, "c", "a%", case_insensitive=True)) == (
+            "lower(convert(`c` USING utf8mb4)) LIKE lower(?)",
+            ["a%"],
+        )
+        assert where(mysql_dialect, Condition(ConditionEnum.NOT_LIKE, "c", "a%", case_insensitive=True)) == (
+            "lower(convert(`c` USING utf8mb4)) NOT LIKE lower(?)",
+            ["a%"],
+        )
+
+    def test_like_before_4_uses_the_generic_form(self) -> None:
+        assert where(mysql("3.23.58"), Condition(ConditionEnum.LIKE, "c", "a%", case_insensitive=True)) == (
+            "lower(`c`) LIKE lower(?)",
+            ["a%"],
+        )
+
+    def test_glob_becomes_like(self, mysql_dialect: MySQLDialect) -> None:
+        assert where(mysql_dialect, Condition(ConditionEnum.GLOB, "c", "a?*")) == ("`c` LIKE BINARY ?", ["a_%"])
+
+    def test_regexp_like_on_mysql_8(self, mysql_dialect: MySQLDialect) -> None:
+        """Case sensitive unless ``i`` is given; the match type is inlined (MySQL rejects a bound one)."""
+        assert where(mysql_dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a", flags="i")) == (
+            "NOT regexp_like(`c`, ?, 'ci')",
+            ["^a"],
+        )
+        assert where(mysql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="ms")) == (
+            "regexp_like(`c`, ?, 'cmn')",
+            ["^a"],
+        )
+
+    @pytest.mark.parametrize("dialect", [mysql("8.4.3"), mysql("8.4.3", {"use_regexp": True}), mysql("5.7.44")])
+    def test_regex_flags_must_be_portable(self, dialect: MySQLDialect) -> None:
+        with pytest.raises(QueryError, match="unsupported regex flags"):
+            where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m'"))
+
+    @pytest.mark.parametrize("dialect", [mysql("8.4.3", {"use_regexp": True}), mariadb("11.4.4-MariaDB")])
+    def test_regexp_operator(self, dialect: MySQLDialect) -> None:
+        """Case sensitive unless ``i`` is given."""
+        assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="i")) == ("`c` REGEXP ?", ["(?i)^a"])
+        assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m")) == ("`c` REGEXP ?", ["(?m-i)^a"])
+        assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["(?-i)^a"])
+
+    def test_regexp_operator_before_8_has_no_inline_flags(self) -> None:
+        """``.`` always matches a newline there, so ``s`` is dropped; other flags cannot be expressed."""
+        assert where(mysql("5.7.44"), Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["^a"])
+        assert where(mysql("5.7.44"), Condition(ConditionEnum.REGEX, "c", "^a", flags="s")) == ("`c` REGEXP ?", ["^a"])
+
+        with pytest.raises(QueryError, match=r"before 8\.0"):
+            where(mysql("5.7.44"), Condition(ConditionEnum.REGEX, "c", "^a", flags="i"))
+
+    @pytest.mark.parametrize(
+        ("value", "cast_type"),
+        [(True, "UNSIGNED"), (1, "SIGNED"), (1.5, "DOUBLE"), ("x", "CHAR"), (datetime(2024, 1, 2), "DATETIME(6)")],
     )
-    assert qwp.query == "SELECT `id`, `name` FROM `users`"
-
-
-def test_mysql_placeholder(mysql_dialect: MySQLDialect) -> None:
-    """Verify MySQL uses ? placeholders, not %s."""
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "Alice"}],
-        on_conflict=None,
-        returning=None,
-        last_insert_id=None,
-    )
-    assert "?" in qwp.query
-    assert "%s" not in qwp.query
-    assert qwp.params == [1, "Alice"]
-
-
-def test_mysql_on_duplicate_key_update(mysql_dialect: MySQLDialect) -> None:
-    """Verify ON DUPLICATE KEY UPDATE with VALUES(col)."""
-    from sentiencedb.query.expressions.excluded import Values
-    updates = {"name": Values()}
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John"}],
-        on_conflict=OnConflict(conflict=["id"], updates=updates),
-        returning=None,
-        last_insert_id=None,
-    )
-    assert "ON DUPLICATE KEY UPDATE" in qwp.query
-    assert "VALUES(`name`)" in qwp.query
-
-
-def test_mysql_on_duplicate_key_update_all(mysql_dialect: MySQLDialect) -> None:
-    """Empty updates dict = update all columns from VALUES."""
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John", "email": "john@example.com"}],
-        on_conflict=OnConflict(conflict=["id"], updates={}),
-        returning=None,
-        last_insert_id=None,
-    )
-    assert "ON DUPLICATE KEY UPDATE" in qwp.query
-    assert "VALUES(`id`)" in qwp.query
-    assert "VALUES(`name`)" in qwp.query
-    assert "VALUES(`email`)" in qwp.query
-
-
-def test_mysql_on_duplicate_key_update_specific(mysql_dialect: MySQLDialect) -> None:
-    """Specific column updates with literal values."""
-    updates = {"name": "UpdatedName", "count": 42}
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John", "count": 0}],
-        on_conflict=OnConflict(conflict=["id"], updates=updates),
-        returning=None,
-        last_insert_id=None,
-    )
-    assert "ON DUPLICATE KEY UPDATE" in qwp.query
-    assert "`name` = ?" in qwp.query
-    assert "`count` = ?" in qwp.query
-    assert qwp.params == [1, "John", 0, "UpdatedName", 42]
-
-
-def test_mysql_on_duplicate_key_update_do_nothing_uses_insert_ignore(
-    mysql_dialect: MySQLDialect,
-) -> None:
-    """DO NOTHING should produce INSERT IGNORE instead of raising."""
-    qwp = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John"}],
-        on_conflict=OnConflict(conflict=["id"], updates=None),
-        returning=None,
-        last_insert_id=None,
-    )
-    assert qwp.query.startswith("INSERT IGNORE INTO ")
-    assert "ON DUPLICATE KEY UPDATE" not in qwp.query
-
-
-def test_mysql_on_duplicate_key_update_last_insert_id_all(
-    mysql_dialect: MySQLDialect,
-) -> None:
-    """last_insert_id with update-all should prepend LAST_INSERT_ID(id) and skip id from VALUES."""
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John", "email": "john@example.com"}],
-        on_conflict=OnConflict(conflict=["id"], updates={}),
-        returning=None,
-        last_insert_id="id",
-    )
-    assert "`id` = LAST_INSERT_ID(`id`)" in qwp.query
-    # id should NOT appear in a VALUES() clause — it's handled by LAST_INSERT_ID
-    assert "VALUES(`id`)" not in qwp.query
-    assert "VALUES(`name`)" in qwp.query
-    assert "VALUES(`email`)" in qwp.query
-    # LAST_INSERT_ID clause must come first
-    update_part = qwp.query.split("ON DUPLICATE KEY UPDATE ")[1]
-    assert update_part.startswith("`id` = LAST_INSERT_ID(`id`)")
-
-
-def test_mysql_on_duplicate_key_update_last_insert_id_specific(
-    mysql_dialect: MySQLDialect,
-) -> None:
-    """last_insert_id with specific updates should prepend LAST_INSERT_ID(id)."""
-    updates = {"name": "UpdatedName"}
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[{"id": 1, "name": "John"}],
-        on_conflict=OnConflict(conflict=["id"], updates=updates),
-        returning=None,
-        last_insert_id="id",
-    )
-    assert "`id` = LAST_INSERT_ID(`id`)" in qwp.query
-    assert "`name` = ?" in qwp.query
-    # LAST_INSERT_ID clause must come first
-    update_part = qwp.query.split("ON DUPLICATE KEY UPDATE ")[1]
-    assert update_part.startswith("`id` = LAST_INSERT_ID(`id`)")
-
-
-def test_mysql_no_returning(mysql_dialect: MySQLDialect) -> None:
-    """RETURNING clause should raise QueryError."""
-    with pytest.raises(QueryError, match="RETURNING"):
-        mysql_dialect.insert(
-            table="users",
-            values=[{"name": "John"}],
-            on_conflict=None,
-            returning=["id"],
-            last_insert_id=None,
+    def test_cast_types(self, mysql_dialect: MySQLDialect, value: Scalar, cast_type: str) -> None:
+        assert where(mysql_dialect, Condition(ConditionEnum.EQUALS, "c", value, cast=True)) == (
+            f"cast(`c` AS {cast_type}) = cast(? AS {cast_type})",
+            [value],
         )
 
 
-def test_mysql_type_mapping(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.type(TypeEnum.BOOL) == "TINYINT(1)"
-    assert mysql_dialect.type(TypeEnum.INT) == "INT"
-    assert mysql_dialect.type(TypeEnum.FLOAT) == "FLOAT"
-    assert mysql_dialect.type(TypeEnum.FLOAT, 64) == "DOUBLE"
-    assert mysql_dialect.type(TypeEnum.STRING) == "VARCHAR(255)"
-    assert mysql_dialect.type(TypeEnum.STRING, 64) == "VARCHAR(64)"
-    assert mysql_dialect.type(TypeEnum.DATETIME) == "DATETIME"
+class TestSelect:
+    def test_lateral_from_mysql_8_0_14(self, mysql_dialect: MySQLDialect, static_query: StaticQuery) -> None:
+        joins = [JoinClause(JoinEnum.LEFT_JOIN_LATERAL, SubQuery(static_query("SELECT 1"), "x"))]
+
+        assert mysql_dialect.select(table="t", joins=joins).query == (
+            "SELECT * FROM `t` LEFT JOIN LATERAL (SELECT 1) AS `x` ON 1"
+        )
+
+        for dialect in (mysql("8.0.13"), mariadb("11.4.4")):
+            with pytest.raises(QueryError, match="LATERAL"):
+                dialect.select(table="t", joins=joins)
+
+    def test_no_distinct_on(self, mariadb_dialect: MySQLDialect) -> None:
+        assert mariadb_dialect.select(table="t", distinct=[]).query == "SELECT DISTINCT * FROM `t`"
+
+        with pytest.raises(QueryError, match="DISTINCT ON"):
+            mariadb_dialect.select(table="t", distinct=["a"])
 
 
-def test_mysql_bool_casting(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.cast_bool(True) == 1
-    assert mysql_dialect.cast_bool(False) == 0
-    assert mysql_dialect.parse_bool(True) is True
-    assert mysql_dialect.parse_bool(False) is False
-    assert mysql_dialect.parse_bool(1) is True
-    assert mysql_dialect.parse_bool(0) is False
-    assert mysql_dialect.parse_bool("true") is True
-    assert mysql_dialect.parse_bool("false") is False
-    assert mysql_dialect.parse_bool("1") is True
-    assert mysql_dialect.parse_bool("yes") is True
-    assert mysql_dialect.parse_bool("on") is True
+class TestInsert:
+    def test_do_nothing_sets_the_conflict_column_to_itself(self, mysql_dialect: MySQLDialect) -> None:
+        """Not ``INSERT IGNORE``, which also turns NOT NULL and truncation errors into warnings."""
+        query_with_params = mysql_dialect.insert(
+            table="t", values=[{"a": 1, "b": 2}, {"a": 2, "b": 3}], on_conflict=OnConflict(["b"])
+        )
+
+        assert (
+            query_with_params.query
+            == "INSERT INTO `t` (`a`, `b`) VALUES (?, ?), (?, ?) ON DUPLICATE KEY UPDATE `b` = `b`"
+        )
+        assert list(query_with_params.params) == [1, 2, 2, 3]
+
+    @pytest.mark.parametrize("conflict", ["uq_a", []])
+    def test_do_nothing_without_conflict_columns_uses_the_first_column(
+        self, mysql_dialect: MySQLDialect, conflict: str | list[str]
+    ) -> None:
+        query_with_params = mysql_dialect.insert(table="t", values=[{"a": 1}], on_conflict=OnConflict(conflict))
+
+        assert query_with_params.query == "INSERT INTO `t` (`a`) VALUES (?) ON DUPLICATE KEY UPDATE `a` = `a`"
+
+    def test_do_nothing_with_last_insert_id(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.insert(
+            table="t", values=[{"a": 1}], on_conflict=OnConflict("uq_a"), last_insert_id="id"
+        )
+
+        assert query_with_params.query == (
+            "INSERT INTO `t` (`a`) VALUES (?) ON DUPLICATE KEY UPDATE `id` = last_insert_id(`id`)"
+        )
+
+    def test_update_every_inserted_column(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.insert(
+            table="users",
+            values=[{"email": "a", "name": "b"}],
+            on_conflict=OnConflict(["email"], {}),
+            last_insert_id="id",
+        )
+
+        assert query_with_params.query == (
+            "INSERT INTO `users` (`email`, `name`) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
+            " `email` = values(`email`), `name` = values(`name`), `id` = last_insert_id(`id`)"
+        )
+
+    def test_explicit_updates(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.insert(
+            table="t", values=[{"a": 1}], on_conflict=OnConflict(["a"], {"n": Raw("n + 1"), "at": "x"})
+        )
+
+        assert (
+            query_with_params.query == "INSERT INTO `t` (`a`) VALUES (?) ON DUPLICATE KEY UPDATE `n` = n + 1, `at` = ?"
+        )
+        assert list(query_with_params.params) == [1, "x"]
+
+    def test_returning_only_on_mariadb_10_5(self, mysql_dialect: MySQLDialect, mariadb_dialect: MySQLDialect) -> None:
+        assert mysql_dialect.insert(table="t", values=[{"a": 1}], returning=[]).query == (
+            "INSERT INTO `t` (`a`) VALUES (?)"
+        )
+        assert mariadb_dialect.insert(table="t", values=[{"a": 1}], returning=["id"]).query == (
+            "INSERT INTO `t` (`a`) VALUES (?) RETURNING `id`"
+        )
+        assert mariadb_dialect.delete(table="t", returning=[]).query == "DELETE FROM `t` RETURNING *"
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on DELETE"):
+            mariadb("10.4.0").delete(table="t", returning=[])
+
+    def test_update_never_returns(self, mariadb_dialect: MySQLDialect) -> None:
+        assert (mariadb_dialect.returning, mariadb_dialect.update_returning) == (True, False)
+        assert mariadb_dialect.update(table="t", updates={"a": 1}).query == "UPDATE `t` SET `a` = ?"
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on UPDATE"):
+            mariadb_dialect.update(table="t", updates={"a": 1}, returning=[])
 
 
-def test_mysql_auto_increment_column(mysql_dialect: MySQLDialect) -> None:
-    col: dict[str, object] = {
-        "name": "id",
-        "type": TypeEnum.INT,
-        "auto_increment": True,
-    }
-    col_def: str = mysql_dialect._build_column(col)
-    assert "AUTO_INCREMENT" in col_def
-    assert "PRIMARY KEY" in col_def
+class TestCreateTable:
+    def test_auto_increment_joins_the_primary_key(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.create_table(
+            table="t",
+            columns=[
+                Column("id", Type(TypeEnum.INTEGER, 64), not_null=True, generated_by_default_as_identity=True),
+                Column("flag", Type(TypeEnum.BOOLEAN), default=True),
+            ],
+            if_not_exists=True,
+        )
+
+        assert query_with_params.query == (
+            "CREATE TABLE IF NOT EXISTS `t` (`id` BIGINT NOT NULL AUTO_INCREMENT, `flag` TINYINT(1) DEFAULT 1,"
+            " PRIMARY KEY (`id`))"
+        )
+
+    def test_auto_increment_already_in_the_primary_key(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.create_table(
+            table="t",
+            columns=[Column("id", "INT", generated_by_default_as_identity=True), Column("k", "INT")],
+            primary_keys=["k", "id"],
+        )
+
+        assert query_with_params.query == (
+            "CREATE TABLE `t` (`id` INT AUTO_INCREMENT, `k` INT, PRIMARY KEY (`k`, `id`))"
+        )
+
+    def test_current_timestamp_gets_the_datetime_precision(self, mysql_dialect: MySQLDialect) -> None:
+        query_with_params = mysql_dialect.create_table(
+            table="t",
+            columns=[
+                Column("a", Type(TypeEnum.DATETIME, 6), default=CurrentTimestamp()),
+                Column("b", Type(TypeEnum.DATETIME), default=CurrentTimestamp()),
+                Column("c", "DATETIME(3)", default=CurrentTimestamp(3)),
+            ],
+        )
+
+        assert query_with_params.query == (
+            "CREATE TABLE `t` (`a` DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6), `b` DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            " `c` DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3))"
+        )
+
+    def test_if_not_exists_needs_3_23(self) -> None:
+        assert mysql("3.22.32").create_table(table="t", columns=[Column("a", "INT")], if_not_exists=True).query == (
+            "CREATE TABLE `t` (`a` INT)"
+        )
 
 
-def test_mysql_regex_condition(mysql_dialect: MySQLDialect) -> None:
-    cond = Condition(
-        condition=ConditionEnum.REGEX,
-        identifier="email",
-        value="^[a-z]+@example\\.com$",
-    )
-    parts: list[str] = []
-    params: list[object] = []
-    mysql_dialect._build_condition(parts, params, cond)
-    result = "".join(parts)
-    assert "REGEXP" in result
-    assert "`email`" in result
+class TestAlterAndIndexes:
+    def test_modify_and_drop_constraint(self, mysql_dialect: MySQLDialect) -> None:
+        statements = mysql_dialect.alter_table(
+            table="t", alters=[AlterColumn("a", "BIGINT NOT NULL"), DropConstraint("uq")]
+        )
 
+        assert [statement.query for statement in statements] == [
+            "ALTER TABLE `t` MODIFY `a` BIGINT NOT NULL",
+            "ALTER TABLE `t` DROP CONSTRAINT `uq`",
+        ]
 
-def test_mysql_not_regex_condition(mysql_dialect: MySQLDialect) -> None:
-    cond = Condition(
-        condition=ConditionEnum.NOT_REGEX,
-        identifier="email",
-        value="^spam@",
-    )
-    parts: list[str] = []
-    params: list[object] = []
-    mysql_dialect._build_condition(parts, params, cond)
-    result = "".join(parts)
-    assert "NOT REGEXP" in result
+    @pytest.mark.parametrize("dialect", [mysql("8.0.18"), mariadb("10.4.34-MariaDB")])
+    def test_drop_constraint_is_drop_index_on_old_servers(self, dialect: MySQLDialect) -> None:
+        assert (
+            dialect.alter_table(table="t", alters=[DropConstraint("uq")])[0].query == "ALTER TABLE `t` DROP INDEX `uq`"
+        )
 
+    def test_identity_column_is_added_with_its_primary_key(self, mysql_dialect: MySQLDialect) -> None:
+        """``AUTO_INCREMENT`` columns must be keys when they are added."""
+        identity = AddColumn("id", Type(TypeEnum.INTEGER, 64), True, generated_by_default_as_identity=True)
+        statements = mysql_dialect.alter_table(
+            table="t",
+            alters=[AddPrimaryKeys(["x"]), identity, AddPrimaryKeys(["id"]), AddColumn("y", "INT")],
+        )
 
-def test_mysql_no_distinct_on(mysql_dialect: MySQLDialect) -> None:
-    assert not mysql_dialect.distinct_on
+        assert [statement.query for statement in statements] == [
+            "ALTER TABLE `t` ADD PRIMARY KEY (`x`)",
+            "ALTER TABLE `t` ADD COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id`)",
+            "ALTER TABLE `t` ADD COLUMN `y` INT",
+        ]
 
+    def test_indexes(self, mysql_dialect: MySQLDialect) -> None:
+        assert mysql_dialect.create_index(table="t", name="i", columns=["a"], if_not_exists=True).query == (
+            "CREATE INDEX `i` ON `t` (`a`)"
+        )
+        assert mysql_dialect.drop_index(table=["db", "t"], name="i", if_exists=True).query == (
+            "DROP INDEX `i` ON `db`.`t`"
+        )
+        assert mysql_dialect.drop_table(table="t", if_exists=True).query == "DROP TABLE IF EXISTS `t`"
 
-def test_mysql_escape_identifier(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.escape_identifier("users") == "`users`"
-    assert mysql_dialect.escape_identifier("order") == "`order`"
-    assert mysql_dialect.escape_identifier("select") == "`select`"
+    @pytest.mark.parametrize("driver", [Driver.MYSQL, Driver.MARIADB])
+    def test_partial_indexes_are_unsupported(self, driver: Driver) -> None:
+        dialect = MySQLDialect(driver, "11.4.4")
 
-
-def test_mysql_escape_string(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.escape_string("it's") == "it''s"
-    assert mysql_dialect.escape_string("back\\slash") == "back\\\\slash"
-    assert mysql_dialect.escape_string("normal") == "normal"
-
-
-def test_mysql_transaction_syntax(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.begin_transaction().query == "START TRANSACTION"
-    assert mysql_dialect.commit_transaction().query == "COMMIT"
-    assert mysql_dialect.rollback_transaction().query == "ROLLBACK"
-
-
-def test_mysql_create_table(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect.create_table(
-        if_not_exists=True,
-        table="users",
-        columns=[
-            {"name": "id", "type": TypeEnum.INT, "auto_increment": True},
-            {"name": "name", "type": TypeEnum.STRING, "bits": 100, "not_null": True},
-            {"name": "email", "type": TypeEnum.STRING, "bits": 255},
-        ],
-    )
-    query = qwp.query
-    assert "CREATE TABLE IF NOT EXISTS" in query
-    assert "`users`" in query
-    assert "`id`" in query
-    assert "AUTO_INCREMENT" in query
-    assert "PRIMARY KEY" in query
-    assert "`name`" in query
-    assert "VARCHAR(100)" in query
-    assert "NOT NULL" in query
-    assert "`email`" in query
-    assert "VARCHAR(255)" in query
-
-
-def test_mysql_alter_add_column(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect._build_alter(
-        "users",
-        {
-            "type": "add_column",
-            "column": {"name": "age", "type": TypeEnum.INT, "not_null": True},
-        },
-    )
-    assert qwp.query == "ALTER TABLE `users` ADD COLUMN `age` INT NOT NULL"
-
-
-def test_mysql_alter_rename_column(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect._build_alter(
-        "users",
-        {"type": "rename_column", "old_name": "name", "new_name": "username"},
-    )
-    assert qwp.query == "ALTER TABLE `users` RENAME COLUMN `name` TO `username`"
-
-
-def test_mysql_alter_drop_primary_key(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect._build_alter(
-        "users",
-        {"type": "drop_constraint", "constraint_type": "primary_key"},
-    )
-    assert qwp.query == "ALTER TABLE `users` DROP PRIMARY KEY"
-
-
-def test_mysql_alter_drop_foreign_key(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect._build_alter(
-        "orders",
-        {
-            "type": "drop_constraint",
-            "constraint_type": "foreign_key",
-            "name": "fk_user_id",
-        },
-    )
-    assert qwp.query == "ALTER TABLE `orders` DROP FOREIGN KEY `fk_user_id`"
-
-
-def test_mysql_insert_with_params(mysql_dialect: MySQLDialect) -> None:
-    """Verify INSERT generates ? placeholders and correct params."""
-    qwp: QueryWithParams = mysql_dialect.insert(
-        table="users",
-        values=[
-            {"name": "Alice", "age": 30},
-            {"name": "Bob", "age": 25},
-        ],
-        on_conflict=None,
-        returning=None,
-        last_insert_id=None,
-    )
-    assert qwp.query == (
-        "INSERT INTO `users` (`name`, `age`) VALUES (?, ?), (?, ?)"
-    )
-    assert qwp.params == ["Alice", 30, "Bob", 25]
-
-
-def test_mysql_update_with_params(mysql_dialect: MySQLDialect) -> None:
-    """Verify UPDATE generates ? placeholders."""
-    from sentiencedb.query._condition import Condition
-    from sentiencedb.query.enums.condition import ConditionEnum
-
-    where = [
-        Condition(condition=ConditionEnum.EQUALS, identifier="id", value=42),
-    ]
-    qwp: QueryWithParams = mysql_dialect.update(
-        table="users",
-        updates={"name": "UpdatedName", "age": 35},
-        where=where,
-        returning=None,
-    )
-    assert "UPDATE `users` SET `name` = ?, `age` = ?" in qwp.query
-    assert "WHERE `id` = ?" in qwp.query
-    assert qwp.params == ["UpdatedName", 35, 42]
-
-
-def test_mysql_delete_with_params(mysql_dialect: MySQLDialect) -> None:
-    """Verify DELETE generates ? placeholders."""
-    from sentiencedb.query._condition import Condition
-    from sentiencedb.query.enums.condition import ConditionEnum
-
-    where = [
-        Condition(condition=ConditionEnum.EQUALS, identifier="id", value=99),
-    ]
-    qwp: QueryWithParams = mysql_dialect.delete(
-        table="users",
-        where=where,
-        returning=None,
-    )
-    assert "DELETE FROM `users`" in qwp.query
-    assert "WHERE `id` = ?" in qwp.query
-    assert qwp.params == [99]
-
-
-def test_mysql_drop_table(mysql_dialect: MySQLDialect) -> None:
-    qwp: QueryWithParams = mysql_dialect.drop_table(
-        if_exists=True,
-        table="users",
-    )
-    assert qwp.query == "DROP TABLE IF EXISTS `users`"
-
-    qwp2: QueryWithParams = mysql_dialect.drop_table(
-        if_exists=False,
-        table="users",
-    )
-    assert qwp2.query == "DROP TABLE `users`"
-
-
-def test_mysql_version_gating(mysql_dialect: MySQLDialect) -> None:
-    assert mysql_dialect.distinct_on is False
-    assert mysql_dialect.lateral is False  # 8.0.0 < 8.0.14
-    assert mysql_dialect.on_conflict is False
-    assert mysql_dialect.returning is False
-    assert mysql_dialect.savepoints is True
-
-    # 8.0.14+ enables lateral
-    mysql_8014 = MySQLDialect(version="8.0.14")
-    assert mysql_8014.lateral is True
-
-    mysql_8020 = MySQLDialect(version="8.0.20")
-    assert mysql_8020.lateral is True
+        with pytest.raises(QueryError, match="partial indexes"):
+            dialect.create_index(table="t", name="i", columns=["a"], where=[Condition(ConditionEnum.EQUALS, "a", 1)])
