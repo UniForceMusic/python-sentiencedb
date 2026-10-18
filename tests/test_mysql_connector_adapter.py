@@ -214,6 +214,16 @@ def test_errors_are_mapped(adapter: MySQLConnectorAdapter, dialect: MySQLDialect
 
 
 @pytest.mark.integration
+def test_prepare_errors_are_mapped(adapter: MySQLConnectorAdapter, dialect: MySQLDialect) -> None:
+    """mysql-connector's C extension reported every prepare error as 2006 "server has gone away"."""
+    with pytest.raises(ProgrammingError) as error:
+        adapter.query_with_params(dialect, QueryWithParams("SELECT * FROM missing_table WHERE id = ?", [1]))
+
+    assert error.value.code == 1146
+    assert adapter.query("SELECT 1 AS one").scalar() == 1
+
+
+@pytest.mark.integration
 def test_connection_per_thread(adapter: MySQLConnectorAdapter) -> None:
     ids: list[int] = []
     thread = threading.Thread(target=lambda: ids.append(adapter.query("SELECT CONNECTION_ID()").scalar()))

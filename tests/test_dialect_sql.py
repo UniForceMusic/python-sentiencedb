@@ -368,11 +368,18 @@ class TestUpdateDelete:
             table="t",
             updates={"a": 1, "b": Raw("b + 1"), "c": static_query("SELECT ?", [2])},
             where=[Condition(ConditionEnum.EQUALS, "id", 3)],
-            returning=[],
         )
 
         assert query_with_params.query == 'UPDATE "t" SET "a" = ?, "b" = b + 1, "c" = (SELECT ?) WHERE "id" = ?'
         assert list(query_with_params.params) == [1, 2, 3]
+
+    def test_unsupported_returning_is_an_error(self, sql_dialect: SQLDialect) -> None:
+        """Only ``INSERT`` drops it silently; :class:`InsertQuery` emulates it."""
+        with pytest.raises(QueryError, match="RETURNING is not supported on UPDATE"):
+            sql_dialect.update(table="t", updates={"a": 1}, returning=[])
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on DELETE"):
+            sql_dialect.delete(table="t", returning=["a"])
 
     def test_update_requires_updates(self, sql_dialect: SQLDialect) -> None:
         with pytest.raises(QueryError, match="no updates"):

@@ -26,11 +26,15 @@ def escape_like(value: str) -> str:
 
 
 def empty(column: IdentifierLike, chain: ChainEnum) -> ConditionGroup:
-    """``(column IS NULL OR column = 0 OR cast(column) = cast(''))``."""
+    """``(column IS NULL OR column = '0' OR cast(column) = cast(''))``.
+
+    Zero is compared as the string ``'0'``, which every engine coerces to the column's type: an integer ``0`` makes
+    PostgreSQL reject text and boolean columns, and makes MySQL match every non-numeric string.
+    """
     return ConditionGroup(
         (
             Condition(ConditionEnum.EQUALS, column, None),
-            Condition(ConditionEnum.EQUALS, column, 0, ChainEnum.OR),
+            Condition(ConditionEnum.EQUALS, column, "0", ChainEnum.OR),
             Condition(ConditionEnum.EQUALS, column, "", ChainEnum.OR, cast=True),
         ),
         chain,
@@ -38,11 +42,11 @@ def empty(column: IdentifierLike, chain: ChainEnum) -> ConditionGroup:
 
 
 def not_empty(column: IdentifierLike, chain: ChainEnum) -> ConditionGroup:
-    """``(column IS NOT NULL AND column <> 0 AND cast(column) <> cast(''))``."""
+    """``(column IS NOT NULL AND column <> '0' AND cast(column) <> cast(''))``; see :func:`empty`."""
     return ConditionGroup(
         (
             Condition(ConditionEnum.NOT_EQUALS, column, None),
-            Condition(ConditionEnum.NOT_EQUALS, column, 0),
+            Condition(ConditionEnum.NOT_EQUALS, column, "0"),
             Condition(ConditionEnum.NOT_EQUALS, column, "", cast=True),
         ),
         chain,

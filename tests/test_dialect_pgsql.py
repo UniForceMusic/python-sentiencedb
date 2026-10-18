@@ -168,7 +168,9 @@ class TestUpsertAndReturning:
         assert dialect.insert(table="t", values=[{"a": 1}], on_conflict=OnConflict(["a"]), returning=[]).query == (
             'INSERT INTO "t" ("a") VALUES (?)'
         )
-        assert dialect.delete(table="t", returning=[]).query == 'DELETE FROM "t"'
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on DELETE"):
+            dialect.delete(table="t", returning=[])
 
     def test_update_and_delete_returning(self, pgsql_dialect: PgSQLDialect) -> None:
         assert pgsql_dialect.update(table="t", updates={"a": 1}, returning=["a", "b"]).query == (

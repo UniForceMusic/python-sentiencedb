@@ -51,7 +51,7 @@ CASES: list[tuple[str, tuple[Any, ...], ConditionNode]] = [
         ConditionGroup(
             (
                 Condition(ConditionEnum.EQUALS, "a", None),
-                Condition(ConditionEnum.EQUALS, "a", 0, OR),
+                Condition(ConditionEnum.EQUALS, "a", "0", OR),
                 Condition(ConditionEnum.EQUALS, "a", "", OR, cast=True),
             )
         ),
@@ -62,7 +62,7 @@ CASES: list[tuple[str, tuple[Any, ...], ConditionNode]] = [
         ConditionGroup(
             (
                 Condition(ConditionEnum.NOT_EQUALS, "a", None),
-                Condition(ConditionEnum.NOT_EQUALS, "a", 0),
+                Condition(ConditionEnum.NOT_EQUALS, "a", "0"),
                 Condition(ConditionEnum.NOT_EQUALS, "a", "", cast=True),
             )
         ),

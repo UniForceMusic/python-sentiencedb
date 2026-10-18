@@ -118,7 +118,7 @@ class DialectABC(ABC):
     ) -> QueryWithParams:
         """``UPDATE <table> SET <column> = <value>, .. [WHERE] [RETURNING]``.
 
-        :raises QueryError: No updates.
+        :raises QueryError: No updates, or ``returning`` without :attr:`update_returning` support.
         """
 
     @abstractmethod
@@ -129,7 +129,10 @@ class DialectABC(ABC):
         where: Sequence[ConditionNode] = (),
         returning: Sequence[str] | None = None,
     ) -> QueryWithParams:
-        """``DELETE FROM <table> [WHERE] [RETURNING]``."""
+        """``DELETE FROM <table> [WHERE] [RETURNING]``.
+
+        :raises QueryError: ``returning`` without :attr:`returning` support.
+        """
 
     @abstractmethod
     def create_table(

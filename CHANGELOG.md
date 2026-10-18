@@ -99,3 +99,13 @@ written for 1.x needs to be migrated (see "Breaking changes" below).
 - Emulated upserts read a non-existent property, dropped `emulate_prepare` and returned a list for multiple rows.
 - SQLite introspection returned internal `sqlite_*` tables and unordered primary keys.
 - The savepoint stack was shared between threads.
+- `where_empty()` / `where_not_empty()` compared with the integer `0`, which PostgreSQL rejects for text and boolean
+  columns and which matches every non-numeric string on MySQL; zero is now compared as `'0'`.
+- Regex conditions on MySQL and MariaDB followed the (case insensitive) column collation; they are case sensitive
+  unless the flags contain `i`, as on the other engines.
+- Emulated `INSERT ... RETURNING` returned one row for a multi-row insert; it now returns every row.
+- `UPDATE` / `DELETE` `RETURNING` was silently dropped where unsupported; it raises `QueryError`.
+- `DROP CONSTRAINT` on MySQL was always `DROP INDEX`, which cannot drop foreign keys; MySQL 8.0.19+ and MariaDB 10.5+
+  use `DROP CONSTRAINT`. Adding an `AUTO_INCREMENT` column with its primary key is one statement, as MySQL requires.
+- Emulated `CREATE INDEX IF NOT EXISTS` / `DROP INDEX IF EXISTS` on MySQL and MariaDB matched an index of the same name
+  on another table.

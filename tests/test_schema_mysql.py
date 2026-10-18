@@ -271,22 +271,23 @@ def test_emulated_drop_table_if_exists(db: Database) -> None:
 
 
 def test_create_index_if_not_exists_is_always_emulated(db: Database) -> None:
+    """Index names are per table: an index of the same name on another table does not count."""
     assert not db.dialect.index_exists
 
     db.create_index("books", "books_title").columns(["isbn"]).if_not_exists().execute()
     db.create_index("authors", "books_title").columns(["age"]).if_not_exists().execute()
-    db.create_index("authors", "authors_age").columns(["age"]).if_not_exists().execute()
-    db.create_index("authors", "authors_age").columns(["age"]).if_not_exists().execute()
+    db.create_index("authors", "books_title").columns(["age"]).if_not_exists().execute()
 
     assert Index("books_title", ["title"], False) in db.information_schema_indexes("books")
     assert db.information_schema_indexes("authors") == [
-        Index("authors_age", ["age"], False),
         Index("authors_name", ["name"], True),
+        Index("books_title", ["age"], False),
     ]
 
 
 def test_drop_index_if_exists_is_always_emulated(db: Database) -> None:
     db.drop_index("books", "missing").if_exists().execute()
+    db.drop_index("authors", "books_title").if_exists().execute()
     db.drop_index("books", "books_title").if_exists().execute()
 
     assert "books_title" not in [index.name for index in db.information_schema_indexes("books")]

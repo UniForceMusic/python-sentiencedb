@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..driver import Driver
 from .objects.sql import Sql
 
 if TYPE_CHECKING:
@@ -29,7 +30,14 @@ def table_exists(database: DatabaseABC, dialect: DialectABC, table: IdentifierLi
 
 
 def index_exists(database: DatabaseABC, dialect: DialectABC, table: IdentifierLike, name: str) -> bool:
-    """Whether an index called ``name`` exists on ``table`` or, as index names may be global, any other table."""
-    tables = dict.fromkeys([table_name(table, dialect), *database.information_schema_tables()])
+    """Whether an index called ``name`` exists where it would clash with a new index on ``table``.
+
+    MySQL and MariaDB name indexes per table, so only ``table`` is searched; elsewhere index names are unique per
+    schema, so every table is.
+    """
+    tables = dict.fromkeys([table_name(table, dialect)])
+
+    if dialect.driver not in (Driver.MYSQL, Driver.MARIADB):
+        tables.update(dict.fromkeys(database.information_schema_tables()))
 
     return any(index.name == name for other in tables for index in database.information_schema_indexes(other))

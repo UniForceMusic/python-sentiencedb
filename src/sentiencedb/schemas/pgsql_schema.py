@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from ..queries.enums import ReferentialActionEnum, TypeEnum
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     from ..dialects.dialect_abc import DialectABC
     from ..queries.objects.ddl import Column, ForeignKeyConstraint, Index
     from ..queries.objects.sql import Sql
+
+_NULL = re.compile(r"NULL(::[\w ]+)?", re.IGNORECASE)
 
 _ACTIONS = {
     "a": ReferentialActionEnum.NO_ACTION,
@@ -126,6 +129,12 @@ class PgSQLSchema(SQLSchema):
                 return Type(TypeEnum.DATETIME, 6 if size is None else size)
             case _:
                 return super()._type(type, size)
+
+    def _default(self, row: Mapping[str, Any], dialect: DialectABC) -> Sql | None:
+        """An explicit ``DEFAULT NULL`` (reported as ``NULL::<type>``) is no default."""
+        default = super()._default(row, dialect)
+
+        return None if default is not None and _NULL.fullmatch(default.raw_sql(dialect)) else default
 
     def _is_identity(self, row: Mapping[str, Any]) -> bool:
         return bool(row["is_identity"]) or str(row["column_default"] or "").startswith("nextval(")

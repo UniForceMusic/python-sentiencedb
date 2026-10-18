@@ -132,15 +132,7 @@ class InsertQuery(ReturningMixin, Query):
         )
 
     def _upsert_rows(self, on_conflict: OnConflict, emulate_prepare: bool) -> Result:
-        columns: dict[str, str | None] = {}
-        rows: list[dict[str, object]] = []
-
-        for row in self._values:
-            result = self._upsert(on_conflict, row, emulate_prepare)
-            columns |= result.columns()
-            rows += result.fetch_dicts()
-
-        return Result(columns, rows)
+        return _merge([self._upsert(on_conflict, row, emulate_prepare) for row in self._values])
 
     def _upsert(self, on_conflict: OnConflict, row: Mapping[str, Value], emulate_prepare: bool) -> ResultABC:
         if isinstance(on_conflict.conflict, str):
@@ -165,10 +157,14 @@ class InsertQuery(ReturningMixin, Query):
         return self._update(on_conflict.updates or row, conflict, emulate_prepare)
 
     def _insert(self, rows: Sequence[Mapping[str, Value]], emulate_prepare: bool) -> ResultABC:
-        result = self._database.query_with_params(self._build(rows), emulate_prepare)
-
         if self._last_insert_id is None or self._returning is None or not self._emulates_returning():
-            return result
+            return self._database.query_with_params(self._build(rows), emulate_prepare)
+
+        if len(rows) > 1:
+            # The last insert id identifies a single row, so every row is inserted (and selected back) on its own.
+            return self._database.transaction(lambda _: _merge([self._insert((row,), emulate_prepare) for row in rows]))
+
+        result = self._database.query_with_params(self._build(rows), emulate_prepare)
 
         last_insert_id = self._database.last_insert_id()
 
@@ -204,6 +200,18 @@ class InsertQuery(ReturningMixin, Query):
             select_query.order_by_desc(self._last_insert_id)
 
         return select_query.execute(emulate_prepare)
+
+
+def _merge(results: Sequence[ResultABC]) -> Result:
+    """One in-memory result with the rows of all ``results``."""
+    columns: dict[str, str | None] = {}
+    rows: list[dict[str, object]] = []
+
+    for result in results:
+        columns |= result.columns()
+        rows += result.fetch_dicts()
+
+    return Result(columns, rows)
 
 
 __all__ = ["InsertQuery"]

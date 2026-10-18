@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from ..sockets.socket_abc import SocketABC
 
 
+_SERVER_GONE_AWAY = 2006
+
+
 class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     """MySQL / MariaDB adapter on mysql-connector-python.
 
@@ -101,12 +104,41 @@ class MySQLConnectorAdapter(DBAPIAdapter["MySQLConnectionAbstract"]):
     def _execute(
         self, connection: MySQLConnectionAbstract, query: str, params: Sequence[Scalar] | None
     ) -> MySQLConnectorResult:
+        import mysql.connector
+
         cursor = connection.cursor() if params is None else connection.cursor(prepared=True)
 
         try:
             cursor.execute(query, params or ())
 
             return MySQLConnectorResult(cursor)
+        except mysql.connector.Error as error:
+            if params is not None and error.errno == _SERVER_GONE_AWAY:
+                self._raise_prepare_error(connection, query)
+
+            raise
+        finally:
+            cursor.close()
+
+    @staticmethod
+    def _raise_prepare_error(connection: MySQLConnectionAbstract, query: str) -> None:
+        """Raise the real error of a failed server side prepare.
+
+        mysql-connector's C extension reports every prepare error (syntax, unknown table, ..) as 2006 "server has
+        gone away". Preparing the statement again in SQL raises the server's actual error; when that succeeds, or
+        the connection really is gone, nothing is raised here.
+        """
+        import mysql.connector
+
+        cursor = connection.cursor()
+
+        try:
+            cursor.execute("SET @sentiencedb_statement = %s", (query,))
+            cursor.execute("PREPARE sentiencedb_statement FROM @sentiencedb_statement")
+            cursor.execute("DEALLOCATE PREPARE sentiencedb_statement")
+        except mysql.connector.Error as error:
+            if error.errno != _SERVER_GONE_AWAY:
+                raise
         finally:
             cursor.close()
 

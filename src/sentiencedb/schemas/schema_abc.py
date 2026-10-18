@@ -32,7 +32,7 @@ class SchemaABC(ABC):
     @abstractmethod
     def columns(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[Column]:
         """Columns in ordinal order. ``type`` is a :class:`Type` when it maps to a portable type, else the raw SQL
-        type; ``default`` is the raw default expression string (or ``None``)."""
+        type; ``default`` is the default expression as :class:`Raw` SQL (or ``None`` without a default)."""
 
     @abstractmethod
     def primary_keys(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[str]:

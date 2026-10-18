@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, ClassVar
 from ..driver import Driver
 from ..exceptions import QueryError
 from ..queries.enums import TypeEnum
-from ..queries.objects.ddl import Type
+from ..queries.objects.ddl import AddColumn, AddPrimaryKeys, Type
 from ..queries.objects.query_with_params import QueryWithParams
 from ..queries.objects.sql import CurrentTimestamp, Raw
 from .sql_dialect import SQLDialect
 
 if TYPE_CHECKING:
     from ..queries.objects.clauses import Condition, ConditionNode, OnConflict
-    from ..queries.objects.ddl import AlterColumn, Column, DropConstraint
+    from ..queries.objects.ddl import Alter, AlterColumn, Column, DropConstraint
     from ..queries.type_aliases import ConditionValue, IdentifierLike, Scalar, Value
 
 
@@ -70,6 +70,24 @@ class MySQLDialect(SQLDialect):
             table=table, name=name, columns=columns, unique=unique, if_not_exists=if_not_exists, where=where
         )
 
+    def alter_table(self, *, table: IdentifierLike, alters: Sequence[Alter]) -> list[QueryWithParams]:
+        """Like :meth:`SQLDialect.alter_table`, but an ``AUTO_INCREMENT`` column is added in one statement with the
+        primary key that follows it: MySQL requires the column to be a key the moment it is added."""
+        queries = super().alter_table(table=table, alters=alters)
+        merged: list[QueryWithParams] = []
+
+        for previous, alter, query in zip((None, *alters[:-1]), alters, queries, strict=True):
+            if (
+                isinstance(alter, AddPrimaryKeys)
+                and isinstance(previous, AddColumn)
+                and previous.generated_by_default_as_identity
+            ):
+                merged[-1] = QueryWithParams(f"{merged[-1].query}, {self._build_alter(alter)}")
+            else:
+                merged.append(query)
+
+        return merged
+
     def begin_transaction(self) -> QueryWithParams:
         return QueryWithParams("START TRANSACTION")
 
@@ -97,9 +115,22 @@ class MySQLDialect(SQLDialect):
         return f"{self._build_column_name(condition)} {self._negation(condition)}{operator} {value}"
 
     def _build_condition_regex(self, params: list[Scalar], condition: Condition) -> str:
-        """``regexp_like()`` on MySQL >= 8.0 unless the ``use_regexp`` option is set; otherwise ``REGEXP``."""
+        """``regexp_like()`` on MySQL >= 8.0 unless the ``use_regexp`` option is set; otherwise ``REGEXP``.
+
+        Both follow the column's (usually case insensitive) collation, so matching is made case sensitive unless the
+        flags contain ``i``: ``regexp_like()`` gets match type ``c`` before the flags, ``REGEXP`` a ``(?-i)`` prefix
+        (MariaDB and MySQL >= 8.0; older MySQL has no inline flags). The match type is inlined as a literal: MySQL
+        rejects a bound one ("Invalid use of parameters").
+        """
         if not self.mariadb and self.version >= 80000 and not self.options.get("use_regexp", False):
-            return super()._build_condition_regex(params, condition)
+            column = self._build_column_name(condition)
+            pattern = self._build_value(params, condition.value)
+            match_type = self.cast_to_query(f"c{condition.flags}")
+
+            return f"{self._negation(condition)}regexp_like({column}, {pattern}, {match_type})"
+
+        if (self.mariadb or self.version >= 80000) and "i" not in condition.flags:
+            condition = replace(condition, flags=f"{condition.flags}-i")
 
         return self._build_condition_regex_operator(params, condition, "REGEXP", "NOT REGEXP")
 
@@ -164,6 +195,11 @@ class MySQLDialect(SQLDialect):
         return f"MODIFY {self.escape_identifier(alter.column)} {alter.sql}"
 
     def _build_drop_constraint(self, alter: DropConstraint) -> str:
+        """``DROP CONSTRAINT`` (any kind) on MySQL >= 8.0.19 and MariaDB >= 10.5; before, ``DROP INDEX`` (unique
+        constraints only)."""
+        if self.version >= (100500 if self.mariadb else 80019):
+            return super()._build_drop_constraint(alter)
+
         return f"DROP INDEX {self.escape_identifier(alter.constraint)}"
 
     def type(self, type: TypeEnum, size: int | None = None) -> str:

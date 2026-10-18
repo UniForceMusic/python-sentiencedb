@@ -87,9 +87,10 @@ db.select("t").where_equals("id", 1).execute()
   use one shared connection (shared transaction state across threads). `regexp_like` / `REGEXP` are Python functions
   registered by the adapter.
 - PostgreSQL: `use_serials` defaults to `True` (identity columns become `SERIAL`/`BIGSERIAL`).
-- MySQL/MariaDB: `RETURNING` on `UPDATE` is never supported (`update_returning`); INSERT `RETURNING` is emulated via
-  `last_insert_id`. A bound `regexp_like()` match type in a server-side prepared statement has been seen to close
-  the connection on current MySQL servers; `use_regexp` avoids it.
+- MySQL/MariaDB: `RETURNING` on `UPDATE` is never supported (`update_returning`; `QueryError`, as for any unsupported
+  UPDATE/DELETE `RETURNING`); INSERT `RETURNING` is emulated via `last_insert_id`, one row per statement. The
+  `regexp_like()` match type is inlined (MySQL rejects a bound one). mysql-connector's C extension reports every
+  server-side prepare error as 2006 "server has gone away"; the adapter re-prepares in SQL to raise the real error.
 - Error classes follow the driver's PEP 249 class: a SQLite syntax error is `OperationalError`, not
   `ProgrammingError`.
 
@@ -105,7 +106,8 @@ db.select("t").where_equals("id", 1).execute()
 - Adapters and facade: `test_sqlite3_adapter.py`, `test_psycopg_adapter.py`, `test_mysql_connector_adapter.py` (mocked
   connection kwargs plus `integration` tests against a live server), `test_database.py`, `test_threading.py`,
   `test_error_mapping.py`.
-- Introspection: `test_schema_{sqlite,pgsql,mysql}.py`. End to end: `test_end_to_end_sqlite.py` (always runs) and the
-  live PostgreSQL / MySQL / MariaDB suites (marker `integration`, skipped when the server is down; the MySQL-family
-  suites create the `sentiencedb` database themselves).
+- Introspection: `test_schema_{sqlite,pgsql,mysql}.py`. End to end: `test_end_to_end_sqlite.py` (always runs) and
+  `test_end_to_end_servers.py`, one suite parametrised over PostgreSQL, MySQL and MariaDB (marker `integration`; each
+  backend is skipped when its port is unreachable; it creates and drops a `sentiencedb_e2e` database and resets it
+  before every test).
 - `test_package.py`: public exports and lazy driver imports.

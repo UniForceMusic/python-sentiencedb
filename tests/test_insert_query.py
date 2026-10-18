@@ -133,6 +133,27 @@ def test_emulated_returning_selects_the_inserted_row(
     assert [call.args for call in mock_database.query_with_params.call_args_list] == [(INSERT, True), (SELECT, True)]
 
 
+def test_emulated_returning_inserts_several_rows_one_by_one(
+    insert: InsertQuery, mock_database: Any, legacy_dialect: Any
+) -> None:
+    """The last insert id identifies one row (on MySQL the first of a multi-row insert)."""
+    mock_database.transaction.side_effect = lambda callback, *args: callback(mock_database)
+    mock_database.query_with_params.side_effect = [
+        Result(),
+        Result({"id": None}, [{"id": 1}]),
+        Result(),
+        Result({"id": None}, [{"id": 2}]),
+    ]
+    mock_database.last_insert_id.side_effect = [1, 2]
+
+    result = insert.values({"name": "a"}, {"name": "b"}).returning(["id"]).last_insert_id("id").execute()
+
+    assert result.fetch_dicts() == [{"id": 1}, {"id": 2}]
+    assert _calls(legacy_dialect) == ["insert", "select", "insert", "select"]
+    assert [call[1]["values"] for call in legacy_dialect.calls[::2]] == [({"name": "a"},), ({"name": "b"},)]
+    mock_database.transaction.assert_called_once()
+
+
 def test_emulate_returning_overrides_native_support(
     insert: InsertQuery, mock_database: Any, recording_dialect: Any
 ) -> None:

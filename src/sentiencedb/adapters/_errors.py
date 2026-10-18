@@ -58,7 +58,8 @@ _MYSQL_VIOLATIONS: Mapping[int, type[IntegrityError]] = {
     1451: ForeignKeyViolationError,  # ER_ROW_IS_REFERENCED_2
     1452: ForeignKeyViolationError,  # ER_NO_REFERENCED_ROW_2
     1048: NotNullViolationError,  # ER_BAD_NULL_ERROR
-    3819: CheckViolationError,  # ER_CHECK_CONSTRAINT_VIOLATED
+    3819: CheckViolationError,  # ER_CHECK_CONSTRAINT_VIOLATED (MySQL raises it as a plain DatabaseError)
+    4025: CheckViolationError,  # ER_CONSTRAINT_FAILED (MariaDB)
 }
 
 
@@ -103,14 +104,14 @@ def _map(
     code: int | None = None,
     violation: type[IntegrityError] | None = None,
 ) -> DriverError:
-    """Pick the class by the driver's PEP 249 exception class, refined by the constraint ``violation``."""
+    """Pick the class by the constraint ``violation`` the error code identifies, else by the driver's PEP 249
+    exception class (drivers do not always raise violations as their ``IntegrityError``)."""
     if connecting:
         mapped: type[DriverError] = ConnectionFailedError
+    elif violation is not None:
+        mapped = violation
     else:
         mapped = next((cls for name, cls in _PEP_249_CLASSES if isinstance(error, getattr(module, name))), DriverError)
-
-        if mapped is IntegrityError and violation is not None:
-            mapped = violation
 
     return mapped(str(error), query=query, sqlstate=sqlstate, code=code)
 

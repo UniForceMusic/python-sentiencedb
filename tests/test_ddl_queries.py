@@ -323,6 +323,19 @@ def test_create_index_emulated(
     assert mock_database.information_schema_indexes.call_args_list[0].args == ("t",)
 
 
+@pytest.mark.parametrize("create", [True, False])
+def test_mysql_index_names_are_per_table(create: bool, mock_database: Any, mysql_dialect: Any) -> None:
+    """An index of the same name on another table neither blocks ``CREATE`` nor satisfies ``DROP``."""
+    mock_database.information_schema_indexes.side_effect = lambda table: [Index("ix", ["a"])] * (table == "other")
+    query = CreateIndexQuery(mock_database, mysql_dialect, "t", "ix").columns(["a"]).if_not_exists()
+
+    (query if create else DropIndexQuery(mock_database, mysql_dialect, "t", "ix").if_exists()).execute()
+
+    assert mock_database.query_with_params.called is create
+    mock_database.information_schema_tables.assert_not_called()
+    mock_database.information_schema_indexes.assert_called_once_with("t")
+
+
 def test_create_index_native(mock_database: Any, recording_dialect: Any) -> None:
     CreateIndexQuery(mock_database, recording_dialect, "t", "ix").columns(["a"]).if_not_exists().execute()
 

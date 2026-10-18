@@ -160,6 +160,8 @@ def test_psycopg_interface_error() -> None:
         ("IntegrityError", 1452, ForeignKeyViolationError),
         ("IntegrityError", 1048, NotNullViolationError),
         ("IntegrityError", 3819, CheckViolationError),
+        ("DatabaseError", 3819, CheckViolationError),
+        ("IntegrityError", 4025, CheckViolationError),
         ("IntegrityError", 1, IntegrityError),
         ("ProgrammingError", 1064, ProgrammingError),
         ("OperationalError", 2013, OperationalError),

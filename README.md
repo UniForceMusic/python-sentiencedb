@@ -469,7 +469,7 @@ same set for `HAVING` with `having` in the name (`having_equals`, `or_having_in`
 | `where_starts_with`, `where_ends_with`, `where_contains`, `where_not_contains` `(column, value, case_insensitive=False)` | `LIKE` with `value` matched literally (wildcards in it are escaped). |
 | `where_glob(column, pattern, case_insensitive=False)` / `where_not_glob(...)` | `GLOB` on SQLite; translated to `LIKE` elsewhere. |
 | `where_regex(column, pattern, flags="")` / `where_not_regex(...)` | Regular expression match; `flags` such as `"i"`. |
-| `where_empty(column)` / `where_not_empty(column)` | `NULL`, `0` or `''` / none of those. |
+| `where_empty(column)` / `where_not_empty(column)` | `NULL`, `0` or `''` / none of those (zero is compared as `'0'`, which every engine coerces to the column type). |
 | `where_exists(select_query)` / `where_not_exists(...)` | `[NOT] EXISTS (<select>)` |
 | `where_group(callback)` / `where_not_group(callback)` | A parenthesised `( ... )` / `NOT ( ... )` group. The callback receives a `WhereGroup`; returning it is optional. Empty groups are dropped. |
 | `where_operator(column, operator, value)` | `column <operator> ?` with the operator emitted verbatim; a list value renders `(?, ?, ...)`. |
@@ -517,10 +517,11 @@ Engine notes:
   SQLite `LIKE ... ESCAPE '\'`. Patterns are always bound as parameters.
 - **Regex.** PostgreSQL 15+ and MySQL 8+ use `regexp_like(column, pattern, flags)`; older PostgreSQL uses `~` / `!~`
   and MariaDB and older MySQL use `REGEXP`, with flags as a `(?flags)` prefix. The `use_tilde_regex` and
-  `use_regexp` options force the operator form. SQLite has no regex support of its own: the adapter registers
-  `regexp_like(value, pattern, flags)` and `REGEXP` on every connection, implemented with Python's `re` (flags `i`,
-  `m`, `s`, `x`). If a MySQL server closes the connection on regex conditions (seen with a bound `regexp_like()` match
-  type in server-side prepared statements), set `use_regexp` or pass `emulate_prepare=True`.
+  `use_regexp` options force the operator form. Matching is case sensitive unless the flags contain `i`, also on
+  MySQL and MariaDB, whose collations usually ignore case: `regexp_like()` gets match type `c` before the flags
+  (inlined as a literal, as MySQL rejects a bound one) and `REGEXP` a `(?-i)` prefix. SQLite has no regex support of
+  its own: the adapter registers `regexp_like(value, pattern, flags)` and `REGEXP` on every connection, implemented
+  with Python's `re` (flags `i`, `m`, `s`, `x`).
 - **`cast=True`** casts to `UNSIGNED`, `SIGNED`, `DECIMAL` or `CHAR` on MySQL, and to the portable types elsewhere.
 
 ## Joins
@@ -638,19 +639,17 @@ print(emulated.execute().fetch_dicts())  # [{'id': 6, 'name': 'Carol'}, {'id': 2
 |---|---|---|---|
 | PostgreSQL 8.2+ | native | native | native |
 | SQLite 3.35+ | native | native | native |
-| MariaDB 10.5+ | native | dropped | native |
-| MySQL, older MariaDB | emulated | dropped | dropped |
+| MariaDB 10.5+ | native | `QueryError` | native |
+| MySQL, older MariaDB | emulated | `QueryError` | `QueryError` |
 
 **INSERT emulation.** Where `RETURNING` is not supported, or after `emulate_returning(last_insert_id)`, the insert
 runs without it and the row is then selected back by the auto increment column:
 `SELECT <columns> FROM table WHERE id = <last insert id> ORDER BY id DESC LIMIT 1`. This requires the column name,
-through `last_insert_id("id")` or `emulate_returning("id")`; without it the result is empty. The emulation returns
-**one row per statement**: for a multi-row insert that is the row of the id the driver reports (on MySQL the first
-inserted row). Insert rows one at a time when you need each of them back. An emulated upsert returns the inserted,
-updated or (for "do nothing") existing row per input row.
+through `last_insert_id("id")` or `emulate_returning("id")`; without it the result is empty. A multi-row insert is
+then run as one insert (and select) per row, inside a transaction, so every row comes back. An emulated upsert
+returns the inserted, updated or (for "do nothing") existing row per input row.
 
-**UPDATE and DELETE** are not emulated: where the engine lacks `RETURNING` the clause is left out and the result has
-no rows.
+**UPDATE and DELETE** are not emulated: where the engine lacks `RETURNING`, `returning()` raises `QueryError`.
 
 ```python
 inserted = db.insert("users").values({"name": "Dave", "email": "dave@example.com"}).returning(["id", "name"])
@@ -755,7 +754,8 @@ db.drop_index("posts", "idx_posts_user").if_exists().execute()
 every `where_*` method for a partial index (its values are inlined as literals, since DDL cannot take bound
 parameters). MySQL and MariaDB have no partial indexes (`QueryError`). `db.drop_index(table, name)` has `if_exists()`
 and `emulate_if_exists()`; on MySQL it renders `DROP INDEX name ON table`, elsewhere `table` is only used by the
-emulation.
+emulation. The emulated checks look for the index name on `table` on MySQL and MariaDB, where index names are per
+table, and on every table of the schema elsewhere.
 
 ## Transactions and savepoints
 
@@ -988,9 +988,10 @@ Integrity errors are refined by code:
 | `UniqueViolationError` | `23505` | `1062`, `1586` | `2067`, `1555` |
 | `ForeignKeyViolationError` | `23503` | `1216`, `1217`, `1451`, `1452` | `787` |
 | `NotNullViolationError` | `23502` | `1048` | `1299` |
-| `CheckViolationError` | `23514` | `3819` | `275` |
+| `CheckViolationError` | `23514` | `3819`, `4025` (MariaDB) | `275` |
 
-The class follows the driver's own classification, which differs per engine: a syntax error is a
+These codes decide the class even when the driver does not raise them as an integrity error (MySQL raises `3819` as a
+plain `DatabaseError`). Otherwise the class follows the driver's own classification, which differs per engine: a syntax error is a
 `ProgrammingError` on PostgreSQL and MySQL but an `OperationalError` on SQLite.
 
 ```python

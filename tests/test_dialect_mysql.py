@@ -12,6 +12,8 @@ from sentiencedb.dialects import MySQLDialect
 from sentiencedb.options import Options
 from sentiencedb.queries.enums import ConditionEnum, JoinEnum, TypeEnum
 from sentiencedb.queries.objects import (
+    AddColumn,
+    AddPrimaryKeys,
     AlterColumn,
     Column,
     Condition,
@@ -82,17 +84,25 @@ class TestConditions:
         assert where(mysql_dialect, Condition(ConditionEnum.GLOB, "c", "a?*")) == ("`c` LIKE BINARY ?", ["a_%"])
 
     def test_regexp_like_on_mysql_8(self, mysql_dialect: MySQLDialect) -> None:
+        """Case sensitive unless ``i`` is given; the match type is inlined (MySQL rejects a bound one)."""
         assert where(mysql_dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a", flags="i")) == (
-            "NOT regexp_like(`c`, ?, ?)",
-            ["^a", "i"],
+            "NOT regexp_like(`c`, ?, 'ci')",
+            ["^a"],
+        )
+        assert where(mysql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m'")) == (
+            "regexp_like(`c`, ?, 'cm\\'')",
+            ["^a"],
         )
 
-    @pytest.mark.parametrize(
-        "dialect", [mysql("5.7.44"), mysql("8.4.3", {"use_regexp": True}), mariadb("11.4.4-MariaDB")]
-    )
+    @pytest.mark.parametrize("dialect", [mysql("8.4.3", {"use_regexp": True}), mariadb("11.4.4-MariaDB")])
     def test_regexp_operator(self, dialect: MySQLDialect) -> None:
+        """Case sensitive unless ``i`` is given."""
         assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="i")) == ("`c` REGEXP ?", ["(?i)^a"])
-        assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["^a"])
+        assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m")) == ("`c` REGEXP ?", ["(?m-i)^a"])
+        assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["(?-i)^a"])
+
+    def test_regexp_operator_before_8_has_no_inline_flags(self) -> None:
+        assert where(mysql("5.7.44"), Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["^a"])
 
     @pytest.mark.parametrize(
         ("value", "cast_type"),
@@ -171,11 +181,16 @@ class TestInsert:
             "INSERT INTO `t` (`a`) VALUES (?) RETURNING `id`"
         )
         assert mariadb_dialect.delete(table="t", returning=[]).query == "DELETE FROM `t` RETURNING *"
-        assert mariadb("10.4.0").delete(table="t", returning=[]).query == "DELETE FROM `t`"
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on DELETE"):
+            mariadb("10.4.0").delete(table="t", returning=[])
 
     def test_update_never_returns(self, mariadb_dialect: MySQLDialect) -> None:
         assert (mariadb_dialect.returning, mariadb_dialect.update_returning) == (True, False)
-        assert mariadb_dialect.update(table="t", updates={"a": 1}, returning=[]).query == "UPDATE `t` SET `a` = ?"
+        assert mariadb_dialect.update(table="t", updates={"a": 1}).query == "UPDATE `t` SET `a` = ?"
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on UPDATE"):
+            mariadb_dialect.update(table="t", updates={"a": 1}, returning=[])
 
 
 class TestCreateTable:
@@ -227,14 +242,34 @@ class TestCreateTable:
 
 
 class TestAlterAndIndexes:
-    def test_modify_and_drop_index(self, mysql_dialect: MySQLDialect) -> None:
+    def test_modify_and_drop_constraint(self, mysql_dialect: MySQLDialect) -> None:
         statements = mysql_dialect.alter_table(
             table="t", alters=[AlterColumn("a", "BIGINT NOT NULL"), DropConstraint("uq")]
         )
 
         assert [statement.query for statement in statements] == [
             "ALTER TABLE `t` MODIFY `a` BIGINT NOT NULL",
-            "ALTER TABLE `t` DROP INDEX `uq`",
+            "ALTER TABLE `t` DROP CONSTRAINT `uq`",
+        ]
+
+    @pytest.mark.parametrize("dialect", [mysql("8.0.18"), mariadb("10.4.34-MariaDB")])
+    def test_drop_constraint_is_drop_index_on_old_servers(self, dialect: MySQLDialect) -> None:
+        assert (
+            dialect.alter_table(table="t", alters=[DropConstraint("uq")])[0].query == "ALTER TABLE `t` DROP INDEX `uq`"
+        )
+
+    def test_identity_column_is_added_with_its_primary_key(self, mysql_dialect: MySQLDialect) -> None:
+        """``AUTO_INCREMENT`` columns must be keys when they are added."""
+        identity = AddColumn("id", Type(TypeEnum.INTEGER, 64), True, generated_by_default_as_identity=True)
+        statements = mysql_dialect.alter_table(
+            table="t",
+            alters=[AddPrimaryKeys(["x"]), identity, AddPrimaryKeys(["id"]), AddColumn("y", "INT")],
+        )
+
+        assert [statement.query for statement in statements] == [
+            "ALTER TABLE `t` ADD PRIMARY KEY (`x`)",
+            "ALTER TABLE `t` ADD COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id`)",
+            "ALTER TABLE `t` ADD COLUMN `y` INT",
         ]
 
     def test_indexes(self, mysql_dialect: MySQLDialect) -> None:

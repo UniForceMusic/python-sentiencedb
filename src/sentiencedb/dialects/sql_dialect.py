@@ -167,7 +167,7 @@ class SQLDialect(DialectABC):
             "SET",
             self._build_set(params, updates),
             self._build_clause("WHERE", params, where),
-            self._build_returning(returning if self.update_returning else None),
+            self._build_returning(returning, "UPDATE", self.update_returning),
         )
 
         return QueryWithParams(query, params)
@@ -184,7 +184,7 @@ class SQLDialect(DialectABC):
             "DELETE FROM",
             self.escape_identifier(table),
             self._build_clause("WHERE", params, where),
-            self._build_returning(returning),
+            self._build_returning(returning, "DELETE", self.returning),
         )
 
         return QueryWithParams(query, params)
@@ -598,7 +598,11 @@ class SQLDialect(DialectABC):
 
         return f"ON CONFLICT {target} DO UPDATE SET {self._build_set(params, updates)}"
 
-    def _build_returning(self, returning: Sequence[str] | None) -> str:
+    def _build_returning(self, returning: Sequence[str] | None, statement: str = "", supported: bool = True) -> str:
+        """``RETURNING ..``; dropped from ``INSERT`` without support (the builder emulates it), an error elsewhere."""
+        if returning is not None and not supported:
+            raise QueryError(f"RETURNING is not supported on {statement}")
+
         if returning is None or not self.returning:
             return ""
 

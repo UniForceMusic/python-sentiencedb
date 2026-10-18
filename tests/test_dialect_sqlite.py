@@ -210,7 +210,10 @@ class TestInsert:
         assert old.insert(table="t", values=[{"a": 1}], on_conflict=OnConflict(["a"]), returning=[]).query == (
             'INSERT INTO "t" ("a") VALUES (?)'
         )
-        assert sqlite("3.34.1").delete(table="t", returning=[]).query == 'DELETE FROM "t"'
+
+        with pytest.raises(QueryError, match="RETURNING is not supported on DELETE"):
+            sqlite("3.34.1").delete(table="t", returning=[])
+
         assert sqlite("3.35.0").delete(table="t", returning=[]).query == 'DELETE FROM "t" RETURNING *'
 
 
