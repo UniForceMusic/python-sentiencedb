@@ -19,7 +19,7 @@ class SQLiteDialect(SQLDialect):
 
     def type(self, type: TypeEnum, size: int | None = None) -> str:
         match type:
-            case TypeEnum.BOOL:
+            case TypeEnum.BOOLEAN:
                 return "BOOLEAN"
             case TypeEnum.FLOAT:
                 return "REAL"

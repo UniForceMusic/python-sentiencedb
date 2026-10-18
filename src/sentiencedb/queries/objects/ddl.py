@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 class Type:
     """A portable column type, rendered by :meth:`DialectABC.type`.
 
-    ``size`` means bits for ``INT``/``FLOAT``, length for ``STRING`` and fractional second digits for ``DATETIME``.
+    ``size`` means bits for ``INTEGER``/``FLOAT`` (> 32 selects the 64 bit type), the length for ``VARCHAR``
+    (default 255), the maximum length for ``TEXT`` (MySQL picks ``MEDIUMTEXT``/``LONGTEXT`` from it) and the
+    fractional second digits for ``DATETIME``.
     """
 
     type: TypeEnum

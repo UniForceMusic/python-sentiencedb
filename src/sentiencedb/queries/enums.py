@@ -70,12 +70,13 @@ class ReferentialActionEnum(StrEnum):
 
 
 class TypeEnum(StrEnum):
-    """Portable column types, mapped to SQL by :meth:`DialectABC.type`."""
+    """Portable (ANSI named) column types, mapped to SQL by :meth:`DialectABC.type`."""
 
-    BOOL = "bool"
-    INT = "int"
+    BOOLEAN = "boolean"
+    INTEGER = "integer"
     FLOAT = "float"
-    STRING = "string"
+    VARCHAR = "varchar"
+    TEXT = "text"
     DATETIME = "datetime"
 
 

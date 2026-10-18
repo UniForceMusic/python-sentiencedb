@@ -39,7 +39,9 @@ class PgSQLDialect(SQLDialect):
 
     @property
     def generated_by_default_as_identity(self) -> bool:
-        return self.version >= 170000
+        """Identity columns only when ``use_serials`` is explicitly false (it defaults to true) on PostgreSQL >= 10;
+        otherwise auto increment columns become ``SERIAL``/``BIGSERIAL``."""
+        return not self.options.get("use_serials", True) and self.version >= 100000
 
     @property
     def index_exists(self) -> bool:

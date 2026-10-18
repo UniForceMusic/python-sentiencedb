@@ -275,14 +275,16 @@ class SQLDialect(DialectABC):
         bits = size or 0
 
         match type:
-            case TypeEnum.BOOL:
+            case TypeEnum.BOOLEAN:
                 return "BOOLEAN" if self.boolean else "INTEGER"
-            case TypeEnum.INT:
+            case TypeEnum.INTEGER:
                 return "BIGINT" if bits > 32 else "INTEGER"
             case TypeEnum.FLOAT:
                 return "DECIMAL(30, 15)" if bits > 32 else "DECIMAL(15, 7)"
-            case TypeEnum.STRING:
-                return "TEXT" if bits > 255 else f"VARCHAR({255 if size is None else size})"
+            case TypeEnum.VARCHAR:
+                return f"VARCHAR({255 if size is None else size})"
+            case TypeEnum.TEXT:
+                return "TEXT"
             case TypeEnum.DATETIME:
                 return "DATETIME"
 

@@ -47,18 +47,16 @@ class MySQLDialect(SQLDialect):
         bits = size or 0
 
         match type:
-            case TypeEnum.BOOL:
+            case TypeEnum.BOOLEAN:
                 return "TINYINT"
             case TypeEnum.FLOAT:
                 return "DOUBLE" if bits > 32 else "FLOAT"
-            case TypeEnum.STRING:
+            case TypeEnum.TEXT:
                 if bits > 16777215:
                     return "LONGTEXT"
                 if bits > 65535:
                     return "MEDIUMTEXT"
-                if bits > 255:
-                    return "TEXT"
-                return f"VARCHAR({255 if size is None else size})"
+                return "TEXT"
             case TypeEnum.DATETIME:
                 return f"DATETIME({bits})" if bits > 0 else "DATETIME"
             case _:
