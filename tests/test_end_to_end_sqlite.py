@@ -294,7 +294,10 @@ class TestUpsertAndReturning:
         assert names(db.select("users").where_is_null("email")) == ["first", "second"]
 
     def test_emulated_upsert_is_atomic(self, db: Database) -> None:
-        rows = [{"name": "Eve", "email": "eve@example.com"}, {"name": None, "email": "frank@example.com"}]
+        rows: list[dict[str, str | None]] = [
+            {"name": "Eve", "email": "eve@example.com"},
+            {"name": None, "email": "frank@example.com"},
+        ]
 
         with pytest.raises(NotNullViolationError):
             db.insert("users").values(*rows).on_conflict_do_update(["email"]).emulate_on_conflict("id").execute()
@@ -322,7 +325,7 @@ class TestUpsertAndReturning:
             .values({"name": "Alicia", "email": "alice@example.com"}, {"name": "Eve", "email": "eve@example.com"})
             .on_conflict_do_update(["email"])
             .returning(["name"])
-            .emulate_on_conflict("id", in_transaction=True)
+            .emulate_on_conflict("id")
         )
 
         assert query.execute().fetch_dicts() == [{"name": "Alicia"}, {"name": "Eve"}]

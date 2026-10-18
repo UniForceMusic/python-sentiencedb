@@ -291,3 +291,20 @@ def test_drop_index_if_exists_is_always_emulated(db: Database) -> None:
     db.drop_index("books", "books_title").if_exists().execute()
 
     assert "books_title" not in [index.name for index in db.information_schema_indexes("books")]
+
+
+def test_existence_checks_and_other_databases(db: Database) -> None:
+    """Index names are unique per table: only the given table is searched."""
+    db.create_table([OTHER_DATABASE, "extra"]).integer("id").execute()
+    db.create_index([OTHER_DATABASE, "extra"], "extra_id").columns("id").execute()
+
+    assert db.information_schema_tables(OTHER_DATABASE) == ["extra"]
+    assert (db.information_schema_table_exists("authors"), db.information_schema_table_exists("extra")) == (True, False)
+    assert db.information_schema_table_exists("extra", OTHER_DATABASE)
+    assert db.information_schema_index_exists("books", "books_title")
+    assert not db.information_schema_index_exists("authors", "books_title")
+    assert not db.information_schema_index_exists("authors", "extra_id", OTHER_DATABASE)
+    assert db.information_schema_index_exists("extra", "extra_id", OTHER_DATABASE)
+
+    db.create_index([OTHER_DATABASE, "extra"], "extra_id").columns("id").if_not_exists().execute()
+    db.drop_index([OTHER_DATABASE, "extra"], "missing").if_exists().execute()

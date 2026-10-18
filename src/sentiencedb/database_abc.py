@@ -163,7 +163,17 @@ class DatabaseABC(ABC):
     def information_schema_schemas(self) -> list[str]: ...
 
     @abstractmethod
-    def information_schema_tables(self) -> list[str]: ...
+    def information_schema_tables(self, schema: str | None = None) -> list[str]:
+        """Base table names in ``schema`` (default: the current database / schema)."""
+
+    @abstractmethod
+    def information_schema_table_exists(self, table: str, schema: str | None = None) -> bool:
+        """Whether the base table ``table`` exists in ``schema`` (default: the current database / schema)."""
+
+    @abstractmethod
+    def information_schema_index_exists(self, table: str, name: str, schema: str | None = None) -> bool:
+        """Whether an index called ``name`` exists where it would clash with a new index on ``table``: anywhere in
+        ``schema`` on PostgreSQL and SQLite, on ``table`` itself on MySQL and MariaDB."""
 
     @abstractmethod
     def information_schema_columns(self, table: str) -> list[Column]: ...

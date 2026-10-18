@@ -318,3 +318,19 @@ def test_emulated_drop_index_if_exists(db: Database) -> None:
     db.drop_index("books", "books_title").if_exists().emulate_if_exists().execute()
 
     assert "books_title" not in [index.name for index in db.information_schema_indexes("books")]
+
+
+def test_existence_checks_and_other_schemas(db: Database) -> None:
+    """Index names are unique per schema: an index on any table of the schema counts."""
+    db.create_table([OTHER_SCHEMA, "extra"]).integer("id").execute()
+    db.create_index([OTHER_SCHEMA, "extra"], "extra_id").columns("id").execute()
+
+    assert db.information_schema_tables(OTHER_SCHEMA) == ["extra"]
+    assert (db.information_schema_table_exists("authors"), db.information_schema_table_exists("extra")) == (True, False)
+    assert db.information_schema_table_exists("extra", OTHER_SCHEMA)
+    assert db.information_schema_index_exists("authors", "books_title")
+    assert not db.information_schema_index_exists("extra", "extra_id")
+    assert db.information_schema_index_exists("authors", "extra_id", OTHER_SCHEMA)
+
+    db.create_table([OTHER_SCHEMA, "extra"]).if_not_exists().emulate_if_not_exists().integer("id").execute()
+    db.drop_index([OTHER_SCHEMA, "extra"], "missing").if_exists().emulate_if_exists().execute()

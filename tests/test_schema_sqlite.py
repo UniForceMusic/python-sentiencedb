@@ -233,6 +233,24 @@ def test_emulated_drop_index_if_exists(db: Database) -> None:
     assert "books_title" not in [index.name for index in db.information_schema_indexes("books")]
 
 
+def test_existence_checks_and_attached_databases(db: Database) -> None:
+    """Table and index names are matched case insensitively; index names are unique per attached database."""
+    db.exec("ATTACH ':memory:' AS aux")
+    db.create_table(["aux", "extra"]).integer("id").execute()
+    db.create_index(["aux", "extra"], "extra_id").columns("id").execute()
+
+    assert db.information_schema_tables("aux") == ["extra"]
+    assert (db.information_schema_table_exists("AUTHORS"), db.information_schema_table_exists("extra")) == (True, False)
+    assert db.information_schema_table_exists("extra", "aux")
+    assert db.information_schema_index_exists("authors", "BOOKS_TITLE")
+    assert not db.information_schema_index_exists("extra", "extra_id")
+    assert db.information_schema_index_exists("authors", "extra_id", "aux")
+
+    db.create_table(["aux", "extra"]).if_not_exists().emulate_if_not_exists().integer("id").execute()
+    db.create_index(["aux", "extra"], "extra_id").columns("id").if_not_exists().emulate_if_not_exists().execute()
+    db.drop_table(["aux", "missing"]).if_exists().emulate_if_exists().execute()
+
+
 def test_copied_foreign_keys_keep_working(db: Database) -> None:
     db.exec("PRAGMA foreign_keys = ON")
     copy_table(db, "books", "books_copy")

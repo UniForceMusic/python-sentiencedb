@@ -1,21 +1,20 @@
-"""Existence checks for emulated ``IF [NOT] EXISTS``, and the table name :class:`QueryFactory` introspects.
+"""Builder tables as ``(schema, name)`` for the database's ``information_schema_*`` methods.
 
-Each check is one catalog query, keyed by the dialect's driver, that honours a schema-qualified ``["schema",
-"table"]`` path: ``information_schema_*`` only sees the current schema / database.
+The emulated ``IF [NOT] EXISTS`` checks honour a schema-qualified ``["schema", "table"]`` path; the per-table
+introspection of :class:`QueryFactory` only covers the current schema / database.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..driver import Driver
 from ..exceptions import QueryError
 from .objects.sql import Identifier, Sql
 
 if TYPE_CHECKING:
     from ..database_abc import DatabaseABC
     from ..dialects.dialect_abc import DialectABC
-    from .type_aliases import IdentifierLike, Scalar
+    from .type_aliases import IdentifierLike
 
 
 def split_table(table: IdentifierLike, dialect: DialectABC) -> tuple[str | None, str]:
@@ -58,64 +57,19 @@ def table_name(table: IdentifierLike, dialect: DialectABC) -> str:
 
 
 def table_exists(database: DatabaseABC, dialect: DialectABC, table: IdentifierLike) -> bool:
-    """Whether ``table`` exists (in its schema when qualified, else in the current schema / database)."""
+    """Whether ``table`` exists (in its schema when qualified); see
+    :meth:`DatabaseABC.information_schema_table_exists`."""
     schema, name = split_table(table, dialect)
-    params: list[Scalar] = [name]
 
-    match dialect.driver:
-        case Driver.SQLITE:
-            master = dialect.escape_identifier([schema, "sqlite_master"]) if schema else "sqlite_master"
-            sql = f"SELECT 1 FROM {master} WHERE type = 'table' AND name = ?"
-        case Driver.PGSQL:
-            sql = f"SELECT 1 FROM pg_catalog.pg_tables WHERE tablename = ? AND schemaname = {_schema(params, schema)}"
-        case Driver.MYSQL | Driver.MARIADB:
-            sql = (
-                "SELECT 1 FROM information_schema.tables WHERE table_name = ? AND table_type = 'BASE TABLE'"
-                f" AND table_schema = {_schema(params, schema, 'DATABASE()')}"
-            )
-        case _:  # pragma: no cover - every Driver is handled
-            raise QueryError(f"cannot look up tables on {dialect.driver}")
-
-    return database.prepared(sql, params).fetch_dict() is not None
+    return database.information_schema_table_exists(name, schema)
 
 
 def index_exists(database: DatabaseABC, dialect: DialectABC, table: IdentifierLike, name: str) -> bool:
-    """Whether an index called ``name`` exists where it would clash with a new index on ``table``.
-
-    MySQL and MariaDB name indexes per table, so only ``table`` is searched; elsewhere index names are unique per
-    schema, so the table's whole schema is.
-    """
+    """Whether an index ``name`` clashes with a new index on ``table``; see
+    :meth:`DatabaseABC.information_schema_index_exists`."""
     schema, table_name_ = split_table(table, dialect)
-    params: list[Scalar] = []
 
-    match dialect.driver:
-        case Driver.SQLITE:
-            master = dialect.escape_identifier([schema, "sqlite_master"]) if schema else "sqlite_master"
-            sql = f"SELECT 1 FROM {master} WHERE type = 'index' AND name = ?"
-            params.append(name)
-        case Driver.PGSQL:
-            params.append(name)
-            sql = f"SELECT 1 FROM pg_catalog.pg_indexes WHERE indexname = ? AND schemaname = {_schema(params, schema)}"
-        case Driver.MYSQL | Driver.MARIADB:
-            params += [table_name_, name]
-            sql = (
-                "SELECT 1 FROM information_schema.statistics WHERE table_name = ? AND index_name = ?"
-                f" AND table_schema = {_schema(params, schema, 'DATABASE()')} LIMIT 1"
-            )
-        case _:  # pragma: no cover - every Driver is handled
-            raise QueryError(f"cannot look up indexes on {dialect.driver}")
-
-    return database.prepared(sql, params).fetch_dict() is not None
-
-
-def _schema(params: list[Scalar], schema: str | None, current: str = "current_schema()") -> str:
-    """A placeholder bound to ``schema``, or the SQL for the current schema."""
-    if schema is None:
-        return current
-
-    params.append(schema)
-
-    return "?"
+    return database.information_schema_index_exists(table_name_, name, schema)
 
 
 __all__ = ["index_exists", "split_table", "table_exists", "table_name"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock, create_autospec
+from unittest.mock import MagicMock, call, create_autospec
 
 import pytest
 
@@ -271,6 +271,11 @@ def test_information_schema_delegates_to_the_schema(db: Database) -> None:
 
     db.information_schema_schemas()
     db.information_schema_tables()
+    db.information_schema_tables("main")
+    db.information_schema_table_exists("users")
+    db.information_schema_table_exists("users", "main")
+    db.information_schema_index_exists("users", "ix")
+    db.information_schema_index_exists("users", "ix", "main")
     db.information_schema_columns("users")
     db.information_schema_primary_keys("users")
     db.information_schema_unique_constraints("users")
@@ -278,7 +283,15 @@ def test_information_schema_delegates_to_the_schema(db: Database) -> None:
     db.information_schema_indexes("users")
 
     schema.schemas.assert_called_once_with(db, db.dialect)
-    schema.tables.assert_called_once_with(db, db.dialect)
+    assert schema.tables.call_args_list == [call(db, db.dialect, None), call(db, db.dialect, "main")]
+    assert schema.table_exists.call_args_list == [
+        call(db, db.dialect, "users", None),
+        call(db, db.dialect, "users", "main"),
+    ]
+    assert schema.index_exists.call_args_list == [
+        call(db, db.dialect, "users", "ix", None),
+        call(db, db.dialect, "users", "ix", "main"),
+    ]
 
     for method in ("columns", "primary_keys", "unique_constraints", "foreign_key_constraints", "indexes"):
         getattr(schema, method).assert_called_once_with(db, db.dialect, "users")

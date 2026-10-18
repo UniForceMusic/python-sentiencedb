@@ -93,8 +93,24 @@ class MySQLSchema(SQLSchema):
 
         return _helpers.indexes(rows)
 
-    def _schema_conditions(self) -> Mapping[str, Sql]:
-        return {"table_schema": raw("DATABASE()")}
+    def index_exists(
+        self, database: DatabaseABC, dialect: DialectABC, table: str, name: str, schema: str | None = None
+    ) -> bool:
+        """Index names are unique per table, so only ``table`` is searched."""
+        query = database.select(raw("information_schema.statistics")).columns({"index_name": raw("index_name")})
+
+        return (
+            self._where_schema(query, schema=schema)
+            .where_equals(raw("table_name"), table)
+            .where_equals(raw("index_name"), name)
+            .limit(1)
+            .execute()
+            .fetch_dict()
+            is not None
+        )
+
+    def _schema_conditions(self, schema: str | None = None) -> Mapping[str, Sql | str]:
+        return {"table_schema": raw("DATABASE()") if schema is None else schema}
 
     def _column_type(self, row: Mapping[str, Any]) -> str | Type:
         return self._parse_type(row["column_type"])

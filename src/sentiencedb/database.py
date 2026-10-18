@@ -353,8 +353,14 @@ class Database(DatabaseABC):
     def information_schema_schemas(self) -> list[str]:
         return self._schema.schemas(self, self._dialect)
 
-    def information_schema_tables(self) -> list[str]:
-        return self._schema.tables(self, self._dialect)
+    def information_schema_tables(self, schema: str | None = None) -> list[str]:
+        return self._schema.tables(self, self._dialect, schema)
+
+    def information_schema_table_exists(self, table: str, schema: str | None = None) -> bool:
+        return self._schema.table_exists(self, self._dialect, table, schema)
+
+    def information_schema_index_exists(self, table: str, name: str, schema: str | None = None) -> bool:
+        return self._schema.index_exists(self, self._dialect, table, name, schema)
 
     def information_schema_columns(self, table: str) -> list[Column]:
         return self._schema.columns(self, self._dialect, table)

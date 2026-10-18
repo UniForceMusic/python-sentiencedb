@@ -52,10 +52,10 @@ class SQLSchema(SchemaABC):
 
         return [row["schema_name"] for row in rows]
 
-    def tables(self, database: DatabaseABC, dialect: DialectABC) -> list[str]:
+    def tables(self, database: DatabaseABC, dialect: DialectABC, schema: str | None = None) -> list[str]:
         query = database.select(raw("information_schema.tables")).columns({"table_name": raw("table_name")})
         rows = (
-            self._where_schema(query)
+            self._where_schema(query, schema=schema)
             .where_equals(raw("table_type"), "BASE TABLE")
             .order_by_asc(raw("table_name"))
             .execute()
@@ -63,6 +63,36 @@ class SQLSchema(SchemaABC):
         )
 
         return [row["table_name"] for row in rows]
+
+    def table_exists(self, database: DatabaseABC, dialect: DialectABC, table: str, schema: str | None = None) -> bool:
+        query = database.select(raw("information_schema.tables")).columns({"table_name": raw("table_name")})
+
+        return (
+            self._where_schema(query, schema=schema)
+            .where_equals(raw("table_name"), table)
+            .where_equals(raw("table_type"), "BASE TABLE")
+            .execute()
+            .fetch_dict()
+            is not None
+        )
+
+    def index_exists(
+        self, database: DatabaseABC, dialect: DialectABC, table: str, name: str, schema: str | None = None
+    ) -> bool:
+        """``information_schema`` has no indexes: looks for a unique constraint called ``name`` in ``schema``, as
+        :meth:`indexes` does."""
+        query = database.select(raw("information_schema.table_constraints")).columns(
+            {"constraint_name": raw("constraint_name")}
+        )
+
+        return (
+            self._where_schema(query, schema=schema)
+            .where_equals(raw("constraint_name"), name)
+            .where_equals(raw("constraint_type"), "UNIQUE")
+            .execute()
+            .fetch_dict()
+            is not None
+        )
 
     def columns(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[Column]:
         query = database.select(raw("information_schema.columns")).columns(
@@ -136,13 +166,14 @@ class SQLSchema(SchemaABC):
             for constraint in self.unique_constraints(database, dialect, table)
         ]
 
-    def _schema_conditions(self) -> Mapping[str, Sql]:
-        """``column = value`` pairs restricting ``information_schema`` rows to the current database / schema."""
-        return {}
+    def _schema_conditions(self, schema: str | None = None) -> Mapping[str, Sql | str]:
+        """``column = value`` pairs restricting ``information_schema`` rows to ``schema`` (``None``: the current
+        database / schema)."""
+        return {} if schema is None else {"table_schema": schema}
 
-    def _where_schema(self, query: SelectQuery, qualifier: str | None = None) -> SelectQuery:
+    def _where_schema(self, query: SelectQuery, qualifier: str | None = None, schema: str | None = None) -> SelectQuery:
         """``query`` restricted by :meth:`_schema_conditions`, on the columns of ``qualifier`` when given."""
-        for column, value in self._schema_conditions().items():
+        for column, value in self._schema_conditions(schema).items():
             query.where_equals([qualifier, column] if qualifier else column, value)
 
         return query

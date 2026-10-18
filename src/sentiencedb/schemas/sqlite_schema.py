@@ -48,9 +48,9 @@ class SQLiteSchema(SchemaABC):
         """The file of every attached database (empty for in-memory and temporary databases)."""
         return [row["file"] for row in database.query("SELECT file FROM pragma_database_list ORDER BY seq")]
 
-    def tables(self, database: DatabaseABC, dialect: DialectABC) -> list[str]:
+    def tables(self, database: DatabaseABC, dialect: DialectABC, schema: str | None = None) -> list[str]:
         rows = (
-            database.select("sqlite_master")
+            database.select(_master(schema))
             .columns(["name"])
             .where_equals("type", "table")
             .where_operator(raw("substr(name, 1, 7)"), "<>", "sqlite_")
@@ -60,6 +60,16 @@ class SQLiteSchema(SchemaABC):
         )
 
         return [row["name"] for row in rows]
+
+    def table_exists(self, database: DatabaseABC, dialect: DialectABC, table: str, schema: str | None = None) -> bool:
+        """Table names are matched case insensitively, as SQLite does."""
+        return self._master_entry_exists(database, dialect, "table", table, schema)
+
+    def index_exists(
+        self, database: DatabaseABC, dialect: DialectABC, table: str, name: str, schema: str | None = None
+    ) -> bool:
+        """Index names are unique per database (``schema``), so the whole database is searched, case insensitively."""
+        return self._master_entry_exists(database, dialect, "index", name, schema)
 
     def columns(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[Column]:
         """Only an ``INTEGER PRIMARY KEY AUTOINCREMENT`` column is ``generated_by_default_as_identity``. Table names
@@ -104,6 +114,15 @@ class SQLiteSchema(SchemaABC):
         without their predicate, expression indexes skipped."""
         return [*self._indexes(database, table, "c"), *self._indexes(database, table, "u")]
 
+    def _master_entry_exists(
+        self, database: DatabaseABC, dialect: DialectABC, type: str, name: str, schema: str | None
+    ) -> bool:
+        """Whether ``schema``'s ``sqlite_master`` has an entry of ``type`` called ``name`` (in any case)."""
+        master = dialect.escape_identifier(_master(schema))
+        query = f"SELECT 1 FROM {master} WHERE type = ? AND name = ? COLLATE NOCASE"
+
+        return database.prepared(query, [type, name]).fetch_dict() is not None
+
     def _indexes(self, database: DatabaseABC, table: str, origin: str) -> list[Index]:
         """The indexes of ``origin``: ``c`` (``CREATE INDEX``), ``u`` (``UNIQUE``) or ``pk`` (``PRIMARY KEY``)."""
         return _helpers.indexes(database.prepared(_INDEXES, [table, origin]).fetch_dicts())
@@ -125,6 +144,11 @@ class SQLiteSchema(SchemaABC):
         parts = _helpers.split_type(sql_type)
 
         return (_helpers.portable_type(*parts) if parts else None) or sql_type
+
+
+def _master(schema: str | None) -> str | list[str]:
+    """The ``sqlite_master`` table of the attached database ``schema`` (``None``: ``main``)."""
+    return "sqlite_master" if schema is None else [schema, "sqlite_master"]
 
 
 __all__ = ["SQLiteSchema"]

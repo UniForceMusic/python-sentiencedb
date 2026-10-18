@@ -88,11 +88,11 @@ class InsertQuery(ReturningMixin, Query):
 
         return self
 
-    def emulate_on_conflict(self, last_insert_id: str, in_transaction: bool = True) -> Self:
-        """Emulate the upsert even when the dialect supports it natively.
+    def emulate_on_conflict(self, last_insert_id: str) -> Self:
+        """Emulate the upsert even when the dialect supports it natively; it runs inside
+        :meth:`DatabaseABC.transaction`.
 
         :param last_insert_id: The auto increment column.
-        :param in_transaction: Ignored: the emulation always runs inside :meth:`DatabaseABC.transaction`.
         """
         self._emulate_on_conflict = True
         self._last_insert_id = last_insert_id

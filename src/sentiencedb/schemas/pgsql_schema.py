@@ -144,8 +144,35 @@ class PgSQLSchema(SQLSchema):
 
         return _helpers.indexes(database.prepared(_INDEXES.format(key_columns=key_columns), [table]).fetch_dicts())
 
-    def _schema_conditions(self) -> Mapping[str, Sql]:
-        return {"table_catalog": raw("current_database()"), "table_schema": raw("current_schema()")}
+    def table_exists(self, database: DatabaseABC, dialect: DialectABC, table: str, schema: str | None = None) -> bool:
+        """Looked up in ``pg_catalog``, which, unlike ``information_schema``, also shows tables the role has no
+        privileges on."""
+        return (
+            database.select(raw("pg_catalog.pg_tables"))
+            .columns({"tablename": raw("tablename")})
+            .where_equals(raw("tablename"), table)
+            .where_equals(raw("schemaname"), _schema(schema))
+            .execute()
+            .fetch_dict()
+            is not None
+        )
+
+    def index_exists(
+        self, database: DatabaseABC, dialect: DialectABC, table: str, name: str, schema: str | None = None
+    ) -> bool:
+        """Index names are unique per schema, so the whole schema is searched."""
+        return (
+            database.select(raw("pg_catalog.pg_indexes"))
+            .columns({"indexname": raw("indexname")})
+            .where_equals(raw("indexname"), name)
+            .where_equals(raw("schemaname"), _schema(schema))
+            .execute()
+            .fetch_dict()
+            is not None
+        )
+
+    def _schema_conditions(self, schema: str | None = None) -> Mapping[str, Sql | str]:
+        return {"table_catalog": raw("current_database()"), "table_schema": _schema(schema)}
 
     def _column_type(self, row: Mapping[str, Any]) -> str | Type:
         return self._parse_type(row["column_type"])
@@ -172,6 +199,11 @@ class PgSQLSchema(SQLSchema):
 
     def _is_identity(self, row: Mapping[str, Any]) -> bool:
         return bool(row["is_identity"])
+
+
+def _schema(schema: str | None) -> Sql | str:
+    """``schema``, or the SQL for the current schema."""
+    return raw("current_schema()") if schema is None else schema
 
 
 __all__ = ["PgSQLSchema"]
