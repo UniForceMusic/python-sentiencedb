@@ -30,6 +30,8 @@ from .helpers import (
     sub_query,
 )
 from .insert_query import InsertQuery
+from .objects.condition_groups import HavingGroup, WhereGroup
+from .objects.join import Join
 from .query import Query
 from .query_factory import QueryFactory
 from .select_query import SelectQuery
@@ -44,7 +46,9 @@ __all__ = [
     "DeleteQuery",
     "DropIndexQuery",
     "DropTableQuery",
+    "HavingGroup",
     "InsertQuery",
+    "Join",
     "JoinEnum",
     "OrderByDirectionEnum",
     "Query",
@@ -54,6 +58,7 @@ __all__ = [
     "TypeEnum",
     "UnionEnum",
     "UpdateQuery",
+    "WhereGroup",
     "alias",
     "current_timestamp",
     "escape_ansi",

@@ -2,24 +2,44 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+import contextlib
+import re
+import sqlite3
+from collections.abc import Callable, Sequence
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
-from .adapter_abc import AdapterABC
+from ..results.sqlite3_result import SQLite3Result
+from ._dbapi_adapter import DBAPIAdapter
+from ._errors import map_sqlite3_error
 
 if TYPE_CHECKING:
     from ..dialects.dialect_abc import DialectABC
     from ..driver import Driver
+    from ..exceptions import DriverError
     from ..options import DebugCallback, Options
-    from ..queries.objects.query_with_params import QueryWithParams
-    from ..results.result_abc import ResultABC
+    from ..queries.type_aliases import Scalar
     from ..sockets.socket_abc import SocketABC
 
+_REGEX_FLAGS = {"i": re.IGNORECASE, "m": re.MULTILINE, "s": re.DOTALL, "x": re.VERBOSE}
 
-class SQLite3Adapter(AdapterABC):
+
+class SQLite3Adapter(DBAPIAdapter[sqlite3.Connection]):
     """SQLite adapter on the standard library ``sqlite3`` module.
 
-    Phase 2 stub (Agent C): see DESIGN.md.
+    Connections run in autocommit mode; transactions are explicit ``BEGIN`` statements. Every connection gets the
+    SQL functions ``REGEXP`` (backing the ``REGEXP`` operator) and ``regexp_like(value, pattern, flags = '')``
+    (``re.search`` with the flags ``i``, ``m``, ``s`` and ``x``) unless ``create_functions`` overrides them.
+
+    In-memory databases (``":memory:"``, ``""``, ``file:`` URIs with ``mode=memory``) exist per connection, so
+    instead of one connection per thread they use a single connection that every thread shares, one statement at
+    a time. Its transaction state is shared too: a transaction begun by one thread includes the other threads'
+    statements.
+
+    The socket is ignored. Options: ``read_only``, ``encryption_key`` (SQLCipher builds), ``busy_timeout``,
+    ``encoding``, ``journal_mode``, ``foreign_keys``, ``deprecated_case_sensitive_like``, ``create_functions`` and
+    ``optimize``.
     """
 
     def __init__(
@@ -31,48 +51,139 @@ class SQLite3Adapter(AdapterABC):
         options: Options,
         debug: DebugCallback | None,
     ) -> None:
-        raise NotImplementedError
+        super().__init__(driver, name, socket, queries, options, debug, shared=_is_in_memory(name))
 
     def version(self) -> str:
-        raise NotImplementedError
-
-    def exec(self, query: str) -> None:
-        raise NotImplementedError
-
-    def query(self, query: str) -> ResultABC:
-        raise NotImplementedError
-
-    def query_with_params(
-        self, dialect: DialectABC, query_with_params: QueryWithParams, emulate_prepare: bool = False
-    ) -> ResultABC:
-        raise NotImplementedError
-
-    def begin_transaction(self, dialect: DialectABC) -> None:
-        raise NotImplementedError
-
-    def commit_transaction(self, dialect: DialectABC) -> None:
-        raise NotImplementedError
-
-    def rollback_transaction(self, dialect: DialectABC) -> None:
-        raise NotImplementedError
-
-    def begin_savepoint(self, dialect: DialectABC, name: str) -> None:
-        raise NotImplementedError
-
-    def commit_savepoint(self, dialect: DialectABC, name: str) -> None:
-        raise NotImplementedError
-
-    def rollback_savepoint(self, dialect: DialectABC, name: str) -> None:
-        raise NotImplementedError
+        return sqlite3.sqlite_version
 
     def in_transaction(self) -> bool:
-        raise NotImplementedError
+        return self._connection().in_transaction
 
     def last_insert_id(self, name: str | None = None) -> int | str | None:
-        raise NotImplementedError
+        connection = self._connection()
 
-    def close(self) -> None:
-        raise NotImplementedError
+        with self._lock:
+            try:
+                value: int | None = self._execute(connection, "SELECT last_insert_rowid()", None).scalar()
+            except sqlite3.Error:
+                return None
+
+        return value
+
+    def _connect(self) -> sqlite3.Connection:
+        options = self._options
+        database = self._name
+        uri = database.startswith("file:")
+
+        if options.get("read_only"):
+            database = _read_only_uri(database)
+            uri = True
+
+        connection = sqlite3.connect(
+            database,
+            timeout=options.get("busy_timeout", 5000) / 1000,
+            isolation_level=None,
+            check_same_thread=False,
+            uri=uri,
+        )
+
+        try:
+            if "encryption_key" in options:
+                connection.execute(f"PRAGMA key = {_quote(options['encryption_key'])}")
+
+            functions: dict[str, Callable[..., Any]] = {
+                "REGEXP": _regexp,
+                "regexp_like": _regexp_like,
+                **options.get("create_functions", {}),
+            }
+
+            for function_name, function in functions.items():
+                connection.create_function(function_name, -1, function)
+        except BaseException:
+            connection.close()
+            raise
+
+        return connection
+
+    def _session_queries(self) -> list[str]:
+        options = self._options
+        queries = []
+
+        if "encoding" in options:
+            queries.append(f"PRAGMA encoding = {_quote(options['encoding'])}")
+
+        if "journal_mode" in options:
+            queries.append(f"PRAGMA journal_mode = {_quote(options['journal_mode'])}")
+
+        if options.get("foreign_keys"):
+            queries.append("PRAGMA foreign_keys = ON")
+
+        if options.get("deprecated_case_sensitive_like"):
+            queries.append("PRAGMA case_sensitive_like = ON")
+
+        return queries
+
+    def _disconnect(self, connection: sqlite3.Connection) -> None:
+        if self._options.get("optimize"):
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("PRAGMA optimize")
+
+        with contextlib.suppress(sqlite3.Error):
+            connection.close()
+
+    def _execute(self, connection: sqlite3.Connection, query: str, params: Sequence[Scalar] | None) -> SQLite3Result:
+        cursor = connection.execute(query) if params is None else connection.execute(query, params)
+
+        return SQLite3Result(cursor)
+
+    def _cast(self, dialect: DialectABC, value: Scalar) -> Scalar:
+        """Decimals are bound as text: ``sqlite3`` cannot bind them, and text keeps them exact."""
+        value = dialect.cast_to_driver(value)
+
+        return str(value) if isinstance(value, Decimal) else value
+
+    def _map_error(self, error: BaseException, query: str | None, *, connecting: bool = False) -> DriverError | None:
+        if not isinstance(error, sqlite3.Error):
+            return None
+
+        return map_sqlite3_error(error, query, connecting=connecting)
+
+
+def _is_in_memory(name: str) -> bool:
+    return (
+        name in ("", ":memory:")
+        or name.startswith("file::memory:")
+        or (name.startswith("file:") and "mode=memory" in name)
+    )
+
+
+def _read_only_uri(name: str) -> str:
+    if not name.startswith("file:"):
+        return f"file:{quote(name)}?mode=ro"
+
+    return f"{name}{'&' if '?' in name else '?'}mode=ro"
+
+
+def _quote(value: str) -> str:
+    """A SQLite string literal (PRAGMA values are not bindable)."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _regexp(pattern: str | None, value: object) -> bool | None:
+    """``value REGEXP pattern``; SQLite passes the pattern first."""
+    return _regexp_like(value, pattern)
+
+
+def _regexp_like(value: object, pattern: str | None, flags: str | None = "") -> bool | None:
+    if value is None or pattern is None:
+        return None
+
+    re_flags = re.NOFLAG
+
+    for flag in flags or "":
+        re_flags |= _REGEX_FLAGS.get(flag, re.NOFLAG)
+
+    return re.search(pattern, str(value), re_flags) is not None
 
 
 __all__ = ["SQLite3Adapter"]

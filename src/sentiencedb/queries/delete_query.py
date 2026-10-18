@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .mixins.returning_mixin import ReturningMixin
+from .mixins.where_mixin import WhereMixin
 from .query import Query
 
 if TYPE_CHECKING:
@@ -13,18 +15,15 @@ if TYPE_CHECKING:
     from .type_aliases import IdentifierLike
 
 
-class DeleteQuery(Query):
-    """``DELETE`` builder.
-
-    Phase 2 stub (Agent B): see DESIGN.md for the complete public API.
-    """
+class DeleteQuery(ReturningMixin, WhereMixin, Query):
+    """``DELETE FROM <table> [WHERE ..] [RETURNING ..]``."""
 
     def __init__(self, database: DatabaseABC, dialect: DialectABC, table: IdentifierLike) -> None:
         super().__init__(database, dialect)
         self._table = table
 
     def to_query_with_params(self) -> QueryWithParams:
-        raise NotImplementedError
+        return self._dialect.delete(table=self._table, where=self._where, returning=self._returning)
 
 
 __all__ = ["DeleteQuery"]

@@ -3,32 +3,67 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar
 
 from ..exceptions import QueryError
-from ..queries.enums import TypeEnum
-from ..queries.objects.alias import Alias
+from ..queries.enums import ConditionEnum, JoinEnum, TypeEnum
+from ..queries.objects.alias import Alias, SubQuery
+from ..queries.objects.clauses import ConditionGroup
+from ..queries.objects.ddl import (
+    AddColumn,
+    AddForeignKeyConstraint,
+    AddPrimaryKeys,
+    AddUniqueConstraint,
+    AlterColumn,
+    DropColumn,
+    DropConstraint,
+    ForeignKeyConstraint,
+    RenameColumn,
+    UniqueConstraint,
+)
 from ..queries.objects.query_with_params import QueryWithParams
-from ..queries.objects.sql import Sql
+from ..queries.objects.sql import Identifier, Raw, Sql
+from ..queries.query import Query
 from .dialect_abc import DialectABC
 
 if TYPE_CHECKING:
-    from ..queries.objects.clauses import ConditionNode, JoinClause, OnConflict, OrderBy, UnionClause
-    from ..queries.objects.ddl import Alter, Column, TableConstraint
-    from ..queries.type_aliases import IdentifierLike, Scalar, SelectColumn, TableRef, Value
+    from ..queries.objects.clauses import Condition, ConditionNode, JoinClause, OnConflict, OrderBy, UnionClause
+    from ..queries.objects.ddl import Alter, Column, TableConstraint, Type
+    from ..queries.type_aliases import ConditionValue, IdentifierLike, Scalar, SelectColumn, TableRef, Value
 
 _TRUE_STRINGS = frozenset({"true", "t", "yes", "y", "on"})
+
+_NEGATED_CONDITIONS = frozenset(
+    {
+        ConditionEnum.NOT_EQUALS,
+        ConditionEnum.NOT_BETWEEN,
+        ConditionEnum.NOT_LIKE,
+        ConditionEnum.NOT_GLOB,
+        ConditionEnum.NOT_IN,
+        ConditionEnum.NOT_REGEX,
+        ConditionEnum.NOT_EXISTS,
+    }
+)
+
+_GLOB_TO_LIKE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_", "*": "%", "?": "_"})
+
+
+def _join(*parts: str) -> str:
+    """Join the non-empty statement parts with single spaces."""
+    return " ".join(part for part in parts if part)
 
 
 class SQLDialect(DialectABC):
     """Generic SQL generation shared by all dialects.
 
     Engine differences are expressed through the class constants below, through the feature flag properties
-    (version gated in subclasses) and by overriding the protected ``_build_*`` hooks.
+    (version gated in subclasses) and by overriding the protected ``_build_*`` hooks. Hooks return SQL fragments
+    and append the parameters of the ``?`` placeholders they emit to ``params``, in placeholder order.
     """
 
     DATETIME_FORMAT: ClassVar[str] = "%Y-%m-%d %H:%M:%S"
@@ -50,7 +85,7 @@ class SQLDialect(DialectABC):
     SAVEPOINTS: ClassVar[bool] = True
     TABLE_EXISTS: ClassVar[bool] = False
 
-    # -- statements (Phase 2, Agent A) --------------------------------------------------------------------------
+    # -- statements ---------------------------------------------------------------------------------------------
 
     def select(
         self,
@@ -67,7 +102,27 @@ class SQLDialect(DialectABC):
         offset: int | None = None,
         unions: Sequence[UnionClause] = (),
     ) -> QueryWithParams:
-        raise NotImplementedError
+        params: list[Scalar] = []
+        query = _join(
+            "SELECT",
+            self._build_distinct(distinct),
+            self._build_columns(params, columns),
+            "FROM",
+            self._build_reference(params, table),
+            self._build_joins(params, joins),
+            self._build_clause("WHERE", params, where),
+            self._build_group_by(group_by),
+            self._build_clause("HAVING", params, having),
+            self._build_order_by(order_by),
+            self._build_limit(limit, offset),
+        )
+
+        if unions:
+            query = f"({query})" + "".join(
+                f" {union.union} {self._build_sub_query(params, union.select_query)}" for union in unions
+            )
+
+        return QueryWithParams(query, params)
 
     def insert(
         self,
@@ -78,7 +133,23 @@ class SQLDialect(DialectABC):
         returning: Sequence[str] | None = None,
         last_insert_id: str | None = None,
     ) -> QueryWithParams:
-        raise NotImplementedError
+        if not values:
+            raise QueryError("no insert values specified")
+
+        params: list[Scalar] = []
+        columns = list(dict.fromkeys(column for row in values for column in row))
+        rows = ", ".join(self._build_row(params, columns, row) for row in values)
+        query = _join(
+            self._build_insert_into(on_conflict, last_insert_id),
+            self.escape_identifier(table),
+            f"({self._escape_all(columns)})",
+            "VALUES",
+            rows,
+            self._build_on_conflict(params, on_conflict, columns, last_insert_id),
+            self._build_returning(returning),
+        )
+
+        return QueryWithParams(query, params)
 
     def update(
         self,
@@ -88,7 +159,20 @@ class SQLDialect(DialectABC):
         where: Sequence[ConditionNode] = (),
         returning: Sequence[str] | None = None,
     ) -> QueryWithParams:
-        raise NotImplementedError
+        if not updates:
+            raise QueryError("no updates specified")
+
+        params: list[Scalar] = []
+        query = _join(
+            "UPDATE",
+            self.escape_identifier(table),
+            "SET",
+            self._build_set(params, updates),
+            self._build_clause("WHERE", params, where),
+            self._build_returning(returning),
+        )
+
+        return QueryWithParams(query, params)
 
     def delete(
         self,
@@ -97,7 +181,15 @@ class SQLDialect(DialectABC):
         where: Sequence[ConditionNode] = (),
         returning: Sequence[str] | None = None,
     ) -> QueryWithParams:
-        raise NotImplementedError
+        params: list[Scalar] = []
+        query = _join(
+            "DELETE FROM",
+            self.escape_identifier(table),
+            self._build_clause("WHERE", params, where),
+            self._build_returning(returning),
+        )
+
+        return QueryWithParams(query, params)
 
     def create_table(
         self,
@@ -108,13 +200,43 @@ class SQLDialect(DialectABC):
         constraints: Sequence[TableConstraint] = (),
         if_not_exists: bool = False,
     ) -> QueryWithParams:
-        raise NotImplementedError
+        if not columns:
+            raise QueryError("no table columns specified")
+
+        definitions = [self._build_column(column) for column in columns]
+        primary_keys = self._primary_key_columns(columns, primary_keys)
+
+        if primary_keys:
+            definitions.append(f"PRIMARY KEY ({self._escape_all(primary_keys)})")
+
+        definitions.extend(self._build_table_constraint(constraint) for constraint in constraints)
+
+        query = _join(
+            "CREATE TABLE",
+            "IF NOT EXISTS" if if_not_exists and self.table_exists else "",
+            self.escape_identifier(table),
+            f"({', '.join(definitions)})",
+            self._build_table_options(),
+        )
+
+        return QueryWithParams(query)
 
     def alter_table(self, *, table: IdentifierLike, alters: Sequence[Alter]) -> list[QueryWithParams]:
-        raise NotImplementedError
+        if not alters:
+            raise QueryError("no table alters specified")
+
+        table_sql = self.escape_identifier(table)
+
+        return [QueryWithParams(f"ALTER TABLE {table_sql} {self._build_alter(alter)}") for alter in alters]
 
     def drop_table(self, *, table: IdentifierLike, if_exists: bool = False) -> QueryWithParams:
-        raise NotImplementedError
+        query = _join(
+            "DROP TABLE",
+            "IF EXISTS" if if_exists and self.table_exists else "",
+            self.escape_identifier(table),
+        )
+
+        return QueryWithParams(query)
 
     def create_index(
         self,
@@ -126,10 +248,460 @@ class SQLDialect(DialectABC):
         if_not_exists: bool = False,
         where: Sequence[ConditionNode] = (),
     ) -> QueryWithParams:
-        raise NotImplementedError
+        if not columns:
+            raise QueryError("no index columns specified")
+
+        params: list[Scalar] = []
+        query = _join(
+            "CREATE",
+            "UNIQUE" if unique else "",
+            "INDEX",
+            "IF NOT EXISTS" if if_not_exists and self.index_exists else "",
+            self.escape_identifier(name),
+            "ON",
+            self.escape_identifier(table),
+            f"({self._escape_all(columns)})",
+            self._build_clause("WHERE", params, where),
+        )
+
+        # DDL statements cannot take bound parameters, so a partial index predicate gets its values as literals.
+        return QueryWithParams(QueryWithParams(query, params).to_sql(self))
 
     def drop_index(self, *, table: IdentifierLike, name: str, if_exists: bool = False) -> QueryWithParams:
-        raise NotImplementedError
+        query = _join(
+            "DROP INDEX",
+            "IF EXISTS" if if_exists and self.index_exists else "",
+            self.escape_identifier(name),
+            f"ON {self.escape_identifier(table)}" if self.DROP_INDEX_ON_TABLE else "",
+        )
+
+        return QueryWithParams(query)
+
+    # -- select clauses -----------------------------------------------------------------------------------------
+
+    def _build_distinct(self, distinct: Sequence[IdentifierLike] | None) -> str:
+        if distinct is None:
+            return ""
+
+        if not distinct:
+            return "DISTINCT"
+
+        if not self.distinct_on:
+            raise QueryError("DISTINCT ON is not supported")
+
+        return f"DISTINCT ON ({self._escape_all(distinct)})"
+
+    def _build_columns(self, params: list[Scalar], columns: Sequence[SelectColumn]) -> str:
+        if not columns:
+            return "*"
+
+        return ", ".join(
+            self._build_sub_query(params, column)
+            if isinstance(column, Query)
+            else self._build_reference(params, column)
+            for column in columns
+        )
+
+    def _build_reference(self, params: list[Scalar], reference: TableRef) -> str:
+        """A table or select list entry; a :class:`SubQuery` renders as ``(<select>) AS <alias>``."""
+        if isinstance(reference, SubQuery):
+            return (
+                f"{self._build_sub_query(params, reference.select_query)} AS {self.escape_identifier(reference.alias)}"
+            )
+
+        return self.escape_identifier(reference)
+
+    def _build_joins(self, params: list[Scalar], joins: Sequence[JoinClause | Sql]) -> str:
+        return " ".join(self._build_join(params, join) for join in joins)
+
+    def _build_join(self, params: list[Scalar], join: JoinClause | Sql) -> str:
+        """``<join> <table> ON <conditions>``; a :class:`Sql` join is inlined with its params."""
+        if isinstance(join, Sql):
+            return self._build_value(params, join)
+
+        if join.join.lateral and not self.lateral:
+            raise QueryError("LATERAL is not supported")
+
+        sql = f"{join.join} {self._build_reference(params, join.table)}"
+
+        if join.conditions:
+            return f"{sql} ON {self._build_conditions(params, join.conditions)}"
+
+        if join.join in (JoinEnum.CROSS_JOIN, JoinEnum.CROSS_JOIN_LATERAL):
+            return sql
+
+        return f"{sql} ON {self.cast_to_query(True)}"
+
+    def _build_group_by(self, group_by: Sequence[IdentifierLike]) -> str:
+        return f"GROUP BY {self._escape_all(group_by)}" if group_by else ""
+
+    def _build_order_by(self, order_by: Sequence[OrderBy]) -> str:
+        if not order_by:
+            return ""
+
+        return "ORDER BY " + ", ".join(f"{self.escape_identifier(item.column)} {item.direction}" for item in order_by)
+
+    def _build_limit(self, limit: int | None, offset: int | None) -> str:
+        """``LIMIT n [OFFSET m]``; an offset without a limit is ignored."""
+        if limit is None:
+            return ""
+
+        if offset is None:
+            return f"LIMIT {limit:d}"
+
+        return f"LIMIT {limit:d} OFFSET {offset:d}"
+
+    # -- conditions ---------------------------------------------------------------------------------------------
+
+    def _build_clause(self, keyword: str, params: list[Scalar], conditions: Sequence[ConditionNode]) -> str:
+        """``<keyword> <conditions>`` (``WHERE``, ``HAVING``), or nothing without conditions."""
+        return f"{keyword} {self._build_conditions(params, conditions)}" if conditions else ""
+
+    def _build_conditions(self, params: list[Scalar], conditions: Sequence[ConditionNode]) -> str:
+        sql = ""
+
+        for index, condition in enumerate(conditions):
+            if index > 0:
+                sql += f" {condition.chain} "
+
+            if isinstance(condition, ConditionGroup):
+                sql += self._build_condition_group(params, condition)
+            else:
+                sql += self._build_condition(params, condition)
+
+        return sql
+
+    def _build_condition_group(self, params: list[Scalar], group: ConditionGroup) -> str:
+        negation = "NOT " if group.negate else ""
+
+        return f"{negation}({self._build_conditions(params, group.conditions)})"
+
+    def _build_condition(self, params: list[Scalar], condition: Condition) -> str:
+        kind = condition.condition
+
+        if not isinstance(kind, ConditionEnum):
+            return self._build_condition_operator(params, condition)
+
+        match kind:
+            case ConditionEnum.EQUALS | ConditionEnum.NOT_EQUALS:
+                return self._build_condition_equals(params, condition)
+            case ConditionEnum.BETWEEN | ConditionEnum.NOT_BETWEEN:
+                return self._build_condition_between(params, condition)
+            case ConditionEnum.LIKE | ConditionEnum.NOT_LIKE:
+                return self._build_condition_like(params, condition)
+            case ConditionEnum.GLOB | ConditionEnum.NOT_GLOB:
+                return self._build_condition_glob(params, condition)
+            case ConditionEnum.IN | ConditionEnum.NOT_IN:
+                return self._build_condition_in(params, condition)
+            case ConditionEnum.REGEX | ConditionEnum.NOT_REGEX:
+                return self._build_condition_regex(params, condition)
+            case ConditionEnum.EXISTS | ConditionEnum.NOT_EXISTS:
+                return f"{kind} {self._build_value(params, condition.value)}"
+            case ConditionEnum.RAW:
+                return f"({self._build_value(params, condition.value)})"
+            case _:
+                return self._build_condition_operator(params, condition)
+
+    def _build_condition_operator(self, params: list[Scalar], condition: Condition) -> str:
+        """``<column> <operator> <value>``; a sequence value renders as ``(?, ?, ..)``."""
+        return (
+            f"{self._build_column_name(condition)} {condition.condition} {self._build_value(params, condition.value)}"
+        )
+
+    def _build_condition_equals(self, params: list[Scalar], condition: Condition) -> str:
+        column = self._build_column_name(condition)
+
+        if condition.value is None:
+            return f"{column} IS {self._negation(condition)}NULL"
+
+        cast_type = self._cast_type(condition.value) if condition.cast else None
+
+        if cast_type is None:
+            return self._build_condition_operator(params, condition)
+
+        value = self._build_value(params, condition.value)
+
+        return f"cast({column} AS {cast_type}) {condition.condition} cast({value} AS {cast_type})"
+
+    def _cast_type(self, value: ConditionValue) -> str | None:
+        """The type both sides of ``where_equals(..., cast=True)`` are cast to; ``None`` compares uncast."""
+        match value:
+            case bool():
+                return self.type(TypeEnum.BOOLEAN)
+            case int():
+                return self.type(TypeEnum.INTEGER, 64)
+            case float():
+                return self.type(TypeEnum.FLOAT, 64)
+            case str():
+                return self.type(TypeEnum.TEXT)
+            case datetime():
+                return self.type(TypeEnum.DATETIME, 6)
+            case _:
+                return None
+
+    def _build_condition_between(self, params: list[Scalar], condition: Condition) -> str:
+        match condition.value:
+            case (minimum, maximum):
+                column = self._build_column_name(condition)
+                low = self._build_value(params, minimum)
+                high = self._build_value(params, maximum)
+
+                return f"{column} {condition.condition} {low} AND {high}"
+            case _:
+                raise QueryError(f"{condition.condition} requires a (min, max) pair")
+
+    def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:
+        """``LIKE`` with backslash escapes in the pattern; case insensitive through ``lower()``."""
+        column = self._build_column_name(condition)
+        value = self._build_value(params, condition.value)
+
+        if condition.case_insensitive:
+            column, value = f"lower({column})", f"lower({value})"
+
+        return f"{column} {self._negation(condition)}LIKE {value}"
+
+    def _build_condition_glob(self, params: list[Scalar], condition: Condition) -> str:
+        """``GLOB`` patterns are translated to ``LIKE`` patterns (``*`` -> ``%``, ``?`` -> ``_``)."""
+        like = replace(
+            condition,
+            condition=ConditionEnum.NOT_LIKE if condition.condition is ConditionEnum.NOT_GLOB else ConditionEnum.LIKE,
+            value=self._pattern(condition).translate(_GLOB_TO_LIKE),
+        )
+
+        return self._build_condition_like(params, like)
+
+    def _build_condition_in(self, params: list[Scalar], condition: Condition) -> str:
+        """``<column> [NOT] IN (..)``; an empty list is always false (``IN``) or always true (``NOT IN``)."""
+        value = condition.value
+
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes) and not value:
+            return "1 = 1" if condition.condition is ConditionEnum.NOT_IN else "1 = 0"
+
+        return self._build_condition_operator(params, condition)
+
+    def _build_condition_regex(self, params: list[Scalar], condition: Condition) -> str:
+        """``[NOT ]regexp_like(<column>, <pattern>, <flags>)``."""
+        column = self._build_column_name(condition)
+        pattern = self._build_value(params, condition.value)
+        flags = self._build_value(params, condition.flags)
+
+        return f"{self._negation(condition)}regexp_like({column}, {pattern}, {flags})"
+
+    def _build_condition_regex_operator(
+        self, params: list[Scalar], condition: Condition, operator: str, negated_operator: str
+    ) -> str:
+        """``<column> <operator> <pattern>``, with the flags as an inline ``(?flags)`` prefix of the pattern."""
+        pattern = self._pattern(condition)
+
+        if condition.flags:
+            pattern = f"(?{condition.flags}){pattern}"
+
+        operator = negated_operator if condition.condition is ConditionEnum.NOT_REGEX else operator
+
+        return f"{self._build_column_name(condition)} {operator} {self._build_value(params, pattern)}"
+
+    def _build_column_name(self, condition: Condition) -> str:
+        if condition.identifier is None:
+            raise QueryError(f"{condition.condition} condition requires a column")
+
+        return self.escape_identifier(condition.identifier)
+
+    @staticmethod
+    def _negation(condition: Condition) -> str:
+        """``"NOT "`` for the negated condition kinds, else ``""``."""
+        return "NOT " if condition.condition in _NEGATED_CONDITIONS else ""
+
+    @staticmethod
+    def _pattern(condition: Condition) -> str:
+        if not isinstance(condition.value, str):
+            raise QueryError(f"{condition.condition} requires a string pattern")
+
+        return condition.value
+
+    # -- values -------------------------------------------------------------------------------------------------
+
+    def _build_value(self, params: list[Scalar], value: ConditionValue) -> str:
+        """A value position: a :class:`Query` becomes a sub-select, a :class:`Sql` is inlined, a sequence becomes
+        ``(<value>, ..)`` and a scalar becomes a ``?`` placeholder."""
+        if isinstance(value, Query):
+            return self._build_sub_query(params, value)
+
+        if isinstance(value, Sql):
+            params.extend(value.params(self))
+
+            return value.sql(self)
+
+        if isinstance(value, str | bytes):
+            params.append(value)
+
+            return "?"
+
+        if isinstance(value, Sequence):
+            return "(" + ", ".join(self._build_value(params, item) for item in value) + ")"
+
+        params.append(value)
+
+        return "?"
+
+    def _build_sub_query(self, params: list[Scalar], query: Query) -> str:
+        query_with_params = query.to_query_with_params().named_params_to_question_marks()
+        params.extend(query_with_params.params)
+
+        return f"({query_with_params.query})"
+
+    def _build_set(self, params: list[Scalar], updates: Mapping[str, Value]) -> str:
+        return ", ".join(
+            f"{self.escape_identifier(column)} = {self._build_value(params, value)}"
+            for column, value in updates.items()
+        )
+
+    def _escape_all(self, identifiers: Iterable[IdentifierLike]) -> str:
+        return ", ".join(self.escape_identifier(identifier) for identifier in identifiers)
+
+    # -- insert -------------------------------------------------------------------------------------------------
+
+    def _build_insert_into(self, on_conflict: OnConflict | None, last_insert_id: str | None) -> str:
+        """The statement's leading keywords."""
+        return "INSERT INTO"
+
+    def _build_row(self, params: list[Scalar], columns: Sequence[str], row: Mapping[str, Value]) -> str:
+        """``(<value>, ..)`` in column order; a column missing from the row gets ``DEFAULT``."""
+        return "(" + ", ".join(self._build_value(params, row[c]) if c in row else "DEFAULT" for c in columns) + ")"
+
+    def _build_on_conflict(
+        self,
+        params: list[Scalar],
+        on_conflict: OnConflict | None,
+        columns: Sequence[str],
+        last_insert_id: str | None,
+    ) -> str:
+        """``ON CONFLICT (<columns>) | ON CONSTRAINT <name>`` + ``DO NOTHING | DO UPDATE SET ..``.
+
+        Empty updates set every inserted column to its ``excluded`` value.
+        """
+        if on_conflict is None or not self.on_conflict:
+            return ""
+
+        if isinstance(on_conflict.conflict, str):
+            target = f"ON CONSTRAINT {self.escape_identifier(on_conflict.conflict)}"
+        else:
+            target = f"({self._escape_all(on_conflict.conflict)})"
+
+        if on_conflict.updates is None:
+            return f"ON CONFLICT {target} DO NOTHING"
+
+        updates = on_conflict.updates or {column: Identifier([Raw("excluded"), column]) for column in columns}
+
+        return f"ON CONFLICT {target} DO UPDATE SET {self._build_set(params, updates)}"
+
+    def _build_returning(self, returning: Sequence[str] | None) -> str:
+        if returning is None or not self.returning:
+            return ""
+
+        return f"RETURNING {self._escape_all(returning) if returning else '*'}"
+
+    # -- table definitions --------------------------------------------------------------------------------------
+
+    def _build_column(self, column: Column) -> str:
+        """``<name> <type> [GENERATED BY DEFAULT AS IDENTITY] [NOT NULL] [DEFAULT <default>]``."""
+        parts = [self.escape_identifier(column.name), self._column_type(column.type)]
+
+        if column.generated_by_default_as_identity and self.generated_by_default_as_identity:
+            parts.append("GENERATED BY DEFAULT AS IDENTITY")
+
+        if column.not_null:
+            parts.append("NOT NULL")
+
+        if column.default is not None:
+            default = column.default
+            parts.append(
+                f"DEFAULT {default.raw_sql(self) if isinstance(default, Sql) else self.cast_to_query(default)}"
+            )
+
+        return " ".join(parts)
+
+    def _column_type(self, column_type: str | Type) -> str:
+        return column_type if isinstance(column_type, str) else self.type(column_type.type, column_type.size)
+
+    def _primary_key_columns(self, columns: Sequence[Column], primary_keys: Sequence[str]) -> Sequence[str]:
+        """The columns of the ``PRIMARY KEY`` clause of ``CREATE TABLE``."""
+        return primary_keys
+
+    def _build_table_constraint(self, constraint: TableConstraint) -> str:
+        match constraint:
+            case UniqueConstraint():
+                return self._build_unique_constraint(constraint)
+            case ForeignKeyConstraint():
+                return self._build_foreign_key_constraint(constraint)
+            case Sql():
+                return constraint.raw_sql(self)
+
+    def _build_constraint_name(self, name: str | None) -> str:
+        return f"CONSTRAINT {self.escape_identifier(name)}" if name else ""
+
+    def _build_unique_constraint(self, constraint: UniqueConstraint) -> str:
+        return _join(self._build_constraint_name(constraint.name), f"UNIQUE ({self._escape_all(constraint.columns)})")
+
+    def _build_foreign_key_constraint(self, constraint: ForeignKeyConstraint) -> str:
+        return _join(
+            self._build_constraint_name(constraint.name),
+            f"FOREIGN KEY ({self._escape_all(constraint.columns)})",
+            f"REFERENCES {self.escape_identifier(constraint.reference_table)}",
+            f"({self._escape_all(constraint.reference_columns)})",
+            f"ON UPDATE {constraint.on_update}" if constraint.on_update else "",
+            f"ON DELETE {constraint.on_delete}" if constraint.on_delete else "",
+        )
+
+    def _build_table_options(self) -> str:
+        """Options appended after the column list of ``CREATE TABLE``."""
+        return ""
+
+    # -- alter table --------------------------------------------------------------------------------------------
+
+    def _build_alter(self, alter: Alter) -> str:
+        match alter:
+            case AddColumn():
+                return self._build_add_column(alter)
+            case AlterColumn():
+                return self._build_alter_column(alter)
+            case RenameColumn():
+                return self._build_rename_column(alter)
+            case DropColumn():
+                return self._build_drop_column(alter)
+            case AddPrimaryKeys():
+                return self._build_add_primary_keys(alter)
+            case AddUniqueConstraint():
+                return self._build_add_unique_constraint(alter)
+            case AddForeignKeyConstraint():
+                return self._build_add_foreign_key_constraint(alter)
+            case DropConstraint():
+                return self._build_drop_constraint(alter)
+            case Sql():
+                return alter.raw_sql(self)
+
+    def _build_add_column(self, alter: AddColumn) -> str:
+        return f"ADD COLUMN {self._build_column(alter)}"
+
+    def _build_alter_column(self, alter: AlterColumn) -> str:
+        return f"ALTER COLUMN {self.escape_identifier(alter.column)} {alter.sql}"
+
+    def _build_rename_column(self, alter: RenameColumn) -> str:
+        return f"RENAME COLUMN {self.escape_identifier(alter.old)} TO {self.escape_identifier(alter.new)}"
+
+    def _build_drop_column(self, alter: DropColumn) -> str:
+        return f"DROP COLUMN {self.escape_identifier(alter.column)}"
+
+    def _build_add_primary_keys(self, alter: AddPrimaryKeys) -> str:
+        return f"ADD PRIMARY KEY ({self._escape_all(alter.columns)})"
+
+    def _build_add_unique_constraint(self, alter: AddUniqueConstraint) -> str:
+        return f"ADD {self._build_unique_constraint(alter)}"
+
+    def _build_add_foreign_key_constraint(self, alter: AddForeignKeyConstraint) -> str:
+        return f"ADD {self._build_foreign_key_constraint(alter)}"
+
+    def _build_drop_constraint(self, alter: DropConstraint) -> str:
+        return f"DROP CONSTRAINT {self.escape_identifier(alter.constraint)}"
 
     # -- transactions -------------------------------------------------------------------------------------------
 
