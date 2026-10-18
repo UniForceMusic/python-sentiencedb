@@ -23,6 +23,9 @@ from sentiencedb.queries.type_aliases import Scalar
         ("9.6.24", 90624),
         ("8.0.34", 80034),
         ("10.11.6-MariaDB-1:10.11.6+maria~ubu2204", 101106),
+        ("5.5.5-10.11.6-MariaDB", 101106),
+        ("5.5.5-10.11.19-MariaDB-ubu2204", 101119),
+        ("5.5.5-log", 50505),
         ("18", 180000),
         ("", 0),
         ("unknown", 0),
@@ -74,11 +77,14 @@ class TestEscapeString:
     def test_ansi_doubles_quote_and_strips_nul(self, sqlite_dialect: SQLiteDialect) -> None:
         assert sqlite_dialect.escape_string("it's\0 \\n") == "'it''s \\n'"
 
-    def test_pgsql_keeps_backslashes_literal(self, pgsql_dialect: PgSQLDialect) -> None:
-        assert pgsql_dialect.escape_string("a\\b'c\n") == "'a\\b''c\n'"
+    def test_pgsql_uses_an_escape_string_for_backslashes(self, pgsql_dialect: PgSQLDialect) -> None:
+        """``E''`` reads the same whether ``standard_conforming_strings`` is on or off."""
+        assert pgsql_dialect.escape_string("a\\b'c\n") == "E'a\\\\b''c\n'"
+        assert pgsql_dialect.escape_string("a'b\n") == "'a''b\n'"
 
-    def test_mysql_uses_backslash_escapes(self, mysql_dialect: MySQLDialect) -> None:
-        assert mysql_dialect.escape_string("a'b\"c\\d\n\0\x1a") == "'a\\'b\"c\\\\d\\n\\0\\Z'"
+    def test_mysql_doubles_the_quote_and_uses_backslash_escapes(self, mysql_dialect: MySQLDialect) -> None:
+        """The doubled quote keeps the literal closed under ``NO_BACKSLASH_ESCAPES``."""
+        assert mysql_dialect.escape_string("a'b\"c\\d\n\0\x1a") == "'a''b\"c\\\\d\\n\\0\\Z'"
 
 
 class TestCastToDriver:
@@ -132,12 +138,12 @@ class TestCastToQuery:
 
         assert pgsql_dialect.cast_to_query(True) == "TRUE"
         assert pgsql_dialect.cast_to_query(False) == "FALSE"
-        assert pgsql_dialect.cast_to_query(b"\xde\xad") == "'\\xdead'::bytea"
+        assert pgsql_dialect.cast_to_query(b"\xde\xad") == "E'\\\\xdead'::bytea"
         assert pgsql_dialect.cast_to_query(datetime(2024, 1, 2, tzinfo=offset)) == "'2024-01-02 00:00:00.000000+02:00'"
 
     def test_mysql_literals(self, mysql_dialect: MySQLDialect) -> None:
         assert mysql_dialect.cast_to_query(True) == "1"
-        assert mysql_dialect.cast_to_query("a'b") == "'a\\'b'"
+        assert mysql_dialect.cast_to_query("a'b") == "'a''b'"
         assert mysql_dialect.cast_to_query(datetime(2024, 1, 2)) == "'2024-01-02 00:00:00.000000'"
 
     @pytest.mark.parametrize("value", [float("inf"), float("nan"), Decimal("NaN"), Decimal("-Infinity")])
@@ -183,7 +189,7 @@ class TestType:
     @pytest.mark.parametrize(
         ("type_enum", "size", "sql", "mysql", "pgsql", "sqlite"),
         [
-            (TypeEnum.BOOLEAN, None, "BOOLEAN", "TINYINT", "BOOLEAN", "BOOLEAN"),
+            (TypeEnum.BOOLEAN, None, "BOOLEAN", "TINYINT(1)", "BOOLEAN", "BOOLEAN"),
             (TypeEnum.INTEGER, None, "INTEGER", "INTEGER", "INTEGER", "INTEGER"),
             (TypeEnum.INTEGER, 32, "INTEGER", "INTEGER", "INTEGER", "INTEGER"),
             (TypeEnum.INTEGER, 64, "BIGINT", "BIGINT", "BIGINT", "BIGINT"),
@@ -198,6 +204,8 @@ class TestType:
             (TypeEnum.TEXT, 16777216, "TEXT", "LONGTEXT", "TEXT", "TEXT"),
             (TypeEnum.DATETIME, None, "DATETIME", "DATETIME", "TIMESTAMP", "DATETIME"),
             (TypeEnum.DATETIME, 6, "DATETIME", "DATETIME(6)", "TIMESTAMP", "DATETIME"),
+            (TypeEnum.DATETIME, 3, "DATETIME", "DATETIME(3)", "TIMESTAMP(3)", "DATETIME"),
+            (TypeEnum.DATETIME, 0, "DATETIME", "DATETIME", "TIMESTAMP(0)", "DATETIME"),
         ],
     )
     def test_type_mapping(

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..queries.enums import ReferentialActionEnum, TypeEnum
 from ..queries.helpers import raw
-from ..queries.objects.ddl import Type
+from ..queries.objects.ddl import Type, UniqueConstraint
 from . import _helpers
 from .sql_schema import SQLSchema
 
@@ -33,8 +33,9 @@ _COLUMNS = """
 SELECT a.attname AS column_name,
     format_type(a.atttypid, a.atttypmod) AS column_type,
     NOT a.attnotnull AS is_nullable,
-    pg_get_expr(d.adbin, d.adrelid) AS column_default,
-    {is_identity} AS is_identity
+    {column_default} AS column_default,
+    {is_identity} OR (pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%'
+        AND pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) IS NOT NULL) AS is_identity
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -64,6 +65,18 @@ WHERE n.nspname = current_schema() AND c.relname = ? AND con.contype = 'f'
 ORDER BY con.conname, k.position
 """
 
+_KEY_COLUMNS = """
+SELECT con.conname AS constraint_name,
+    a.attname AS column_name
+FROM pg_catalog.pg_constraint con
+JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, position)
+JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+WHERE n.nspname = current_schema() AND c.relname = ? AND con.contype = ?
+ORDER BY con.conname, k.position
+"""
+
 _INDEXES = """
 SELECT ic.relname AS index_name,
     i.indisunique AS is_unique,
@@ -82,17 +95,38 @@ ORDER BY ic.relname, k.position
 class PgSQLSchema(SQLSchema):
     """PostgreSQL introspection of the ``current_schema()``.
 
-    Schemas, tables, primary keys and unique constraints come from ``information_schema``; columns, foreign keys
-    and indexes from ``pg_catalog``, which knows exact types (``format_type``), identity columns, the column order of
-    foreign keys referencing unique indexes, and index key columns.
+    Schemas and tables come from ``information_schema``; columns, keys, constraints and indexes from ``pg_catalog``,
+    which knows exact types (``format_type``), identity columns, the column order of foreign keys referencing unique
+    indexes and index key columns, and, unlike ``information_schema``, also shows the constraints of tables the role
+    can only read.
     """
 
     def columns(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[Column]:
-        """Identity and ``SERIAL`` columns are ``generated_by_default_as_identity`` without a default."""
-        is_identity = "a.attidentity <> ''" if dialect.version >= 100000 else "FALSE"
-        rows = database.prepared(_COLUMNS.format(is_identity=is_identity), [table]).fetch_dicts()
+        """Identity and ``SERIAL`` columns (a ``nextval()`` default on a sequence the column owns) are
+        ``generated_by_default_as_identity`` without a default; generated columns have no default."""
+        modern = dialect.version >= 120000
+        query = _COLUMNS.format(
+            is_identity="a.attidentity <> ''" if dialect.version >= 100000 else "FALSE",
+            column_default=(
+                "CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END"
+                if modern
+                else "pg_get_expr(d.adbin, d.adrelid)"
+            ),
+        )
+        rows = database.prepared(query, [table]).fetch_dicts()
 
         return [self._column(row, dialect) for row in rows]
+
+    def primary_keys(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[str]:
+        return [row["column_name"] for row in database.prepared(_KEY_COLUMNS, [table, "p"]).fetch_dicts()]
+
+    def unique_constraints(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[UniqueConstraint]:
+        rows = database.prepared(_KEY_COLUMNS, [table, "u"]).fetch_dicts()
+
+        return [
+            UniqueConstraint([row["column_name"] for row in group], name)
+            for name, group in _helpers.group_rows(rows, "constraint_name").items()
+        ]
 
     def foreign_key_constraints(
         self, database: DatabaseABC, dialect: DialectABC, table: str
@@ -137,7 +171,7 @@ class PgSQLSchema(SQLSchema):
         return None if default is not None and _NULL.fullmatch(default.raw_sql(dialect)) else default
 
     def _is_identity(self, row: Mapping[str, Any]) -> bool:
-        return bool(row["is_identity"]) or str(row["column_default"] or "").startswith("nextval(")
+        return bool(row["is_identity"])
 
 
 __all__ = ["PgSQLSchema"]

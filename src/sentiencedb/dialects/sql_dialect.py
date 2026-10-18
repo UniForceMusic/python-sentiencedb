@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from functools import cached_property
@@ -50,12 +50,157 @@ _NEGATED_CONDITIONS = frozenset(
     }
 )
 
-_GLOB_TO_LIKE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_", "*": "%", "?": "_"})
+_REGEX_FLAGS = frozenset("ims")
+"""The portable regex flags: ``i`` ignores case, ``m`` makes ``^``/``$`` match at line breaks and ``s`` lets ``.``
+match a newline."""
+
+
+@dataclass(frozen=True, slots=True)
+class _GlobClass:
+    """A ``[...]`` GLOB character class: its ``(low, high)`` ranges (``low == high`` for one character)."""
+
+    negate: bool
+    ranges: list[tuple[str, str]]
 
 
 def _join(*parts: str) -> str:
     """Join the non-empty statement parts with single spaces."""
     return " ".join(part for part in parts if part)
+
+
+def _portable_regex_flags(flags: str) -> str:
+    """``flags`` without duplicates.
+
+    :raises QueryError: A flag other than ``i``, ``m`` and ``s``.
+    """
+    unknown = set(flags) - _REGEX_FLAGS
+
+    if unknown:
+        raise QueryError(f"unsupported regex flags {''.join(sorted(unknown))!r}; the portable flags are i, m and s")
+
+    return "".join(dict.fromkeys(flags))
+
+
+def _split_path(table: IdentifierLike) -> tuple[list[str | Sql], IdentifierLike]:
+    """``(schema path, bare table)`` of a table identifier: ``["s", "t"]`` -> ``(["s"], "t")``, ``"t"`` ->
+    ``([], "t")``. An :class:`Identifier` is split like its path; other :class:`Sql` cannot be split."""
+    path = table.identifier if isinstance(table, Identifier) else table
+
+    if isinstance(path, str | Sql) or len(path) < 2:
+        return [], table
+
+    return list(path[:-1]), path[-1]
+
+
+def _qualified(table: IdentifierLike, name: str) -> IdentifierLike:
+    """``name`` qualified with the schema path of ``table``: ``(["s", "t"], "i")`` -> ``["s", "i"]``."""
+    schema, _ = _split_path(table)
+
+    return [*schema, name] if schema else name
+
+
+def _glob_tokens(pattern: str) -> list[str | _GlobClass]:
+    """Tokenize a GLOB pattern the way SQLite reads it: the wildcards ``*`` and ``?``, ``[...]`` classes
+    (``[^...]`` negated; a leading ``]`` and a ``-`` that cannot form a range are literal) and literal characters.
+    Outside a class ``*`` and ``?`` are always wildcards, so every other string token is a literal.
+
+    :raises QueryError: A ``[`` without its closing ``]``.
+    """
+    tokens: list[str | _GlobClass] = []
+    index = 0
+
+    while index < len(pattern):
+        char = pattern[index]
+        index += 1
+
+        if char != "[":
+            tokens.append(char)
+            continue
+
+        negate = pattern.startswith("^", index)
+        index += negate
+        ranges: list[tuple[str, str]] = []
+
+        if pattern.startswith("]", index):
+            ranges.append(("]", "]"))
+            index += 1
+
+        prior: str | None = None
+
+        while index < len(pattern) and pattern[index] != "]":
+            char = pattern[index]
+
+            if char == "-" and prior is not None and index + 1 < len(pattern) and pattern[index + 1] != "]":
+                ranges[-1] = (prior, pattern[index + 1])
+                prior = None
+                index += 2
+                continue
+
+            ranges.append((char, char))
+            prior = char
+            index += 1
+
+        if index >= len(pattern):
+            raise QueryError(f"unterminated [ in GLOB pattern {pattern!r}")
+
+        tokens.append(_GlobClass(negate, ranges))
+        index += 1
+
+    return tokens
+
+
+def _glob_to_like(tokens: Sequence[str | _GlobClass]) -> str | None:
+    """The ``LIKE`` pattern (backslash escapes) matching the same strings, or ``None`` when a character class needs
+    a regex. A class of one character (``[*]``, ``[[]``) is a literal."""
+    parts: list[str] = []
+
+    for token in tokens:
+        if isinstance(token, _GlobClass):
+            match token:
+                case _GlobClass(negate=False, ranges=[(low, high)]) if low == high:
+                    parts.append(_like_literal(low))
+                case _:
+                    return None
+        elif token == "*":
+            parts.append("%")
+        elif token == "?":
+            parts.append("_")
+        else:
+            parts.append(_like_literal(token))
+
+    return "".join(parts)
+
+
+def _like_literal(char: str) -> str:
+    return f"\\{char}" if char in "\\%_" else char
+
+
+def _glob_to_regex(tokens: Sequence[str | _GlobClass]) -> str:
+    """An anchored regex matching the same strings (with the ``s`` flag, as ``*`` and ``?`` match newlines). ASCII
+    punctuation is backslash escaped, which every engine's regex dialect reads as the literal character."""
+    parts = ["^"]
+
+    for token in tokens:
+        if isinstance(token, _GlobClass):
+            items = "".join(
+                _regex_literal(low) if low == high else f"{_regex_literal(low)}-{_regex_literal(high)}"
+                for low, high in token.ranges
+            )
+            parts.append(f"[{'^' if token.negate else ''}{items}]")
+        elif token == "*":
+            parts.append(".*")
+        elif token == "?":
+            parts.append(".")
+        else:
+            parts.append(_regex_literal(token))
+
+    parts.append("$")
+
+    return "".join(parts)
+
+
+def _regex_literal(char: str) -> str:
+    return f"\\{char}" if char.isascii() and not char.isalnum() and not char.isspace() else char
 
 
 class SQLDialect(DialectABC):
@@ -68,8 +213,6 @@ class SQLDialect(DialectABC):
 
     DATETIME_FORMAT: ClassVar[str] = "%Y-%m-%d %H:%M:%S"
     """``strftime`` format of datetime parameters and literals."""
-    ESCAPE_ANSI: ClassVar[bool] = True
-    """Escape the string quote by doubling it (``''``); otherwise by a backslash (``\\'``)."""
     ESCAPE_IDENTIFIER: ClassVar[str] = '"'
     ESCAPE_STRING: ClassVar[str] = "'"
     ESCAPE_CHARS: ClassVar[Mapping[str, str]] = {"\0": ""}
@@ -138,13 +281,13 @@ class SQLDialect(DialectABC):
         columns = list(dict.fromkeys(column for row in values for column in row))
         rows = ", ".join(self._build_row(params, columns, row) for row in values)
         query = _join(
-            self._build_insert_into(on_conflict, last_insert_id),
+            "INSERT INTO",
             self.escape_identifier(table),
             f"({self._escape_all(columns)})",
             "VALUES",
             rows,
             self._build_on_conflict(params, on_conflict, columns, last_insert_id),
-            self._build_returning(returning),
+            self._build_returning(returning) if self.returning else "",
         )
 
         return QueryWithParams(query, params)
@@ -167,7 +310,7 @@ class SQLDialect(DialectABC):
             "SET",
             self._build_set(params, updates),
             self._build_clause("WHERE", params, where),
-            self._build_returning(returning, "UPDATE", self.update_returning),
+            self._require_returning(returning, "UPDATE", self.update_returning),
         )
 
         return QueryWithParams(query, params)
@@ -184,7 +327,7 @@ class SQLDialect(DialectABC):
             "DELETE FROM",
             self.escape_identifier(table),
             self._build_clause("WHERE", params, where),
-            self._build_returning(returning, "DELETE", self.returning),
+            self._require_returning(returning, "DELETE", self.returning),
         )
 
         return QueryWithParams(query, params)
@@ -255,9 +398,9 @@ class SQLDialect(DialectABC):
             "UNIQUE" if unique else "",
             "INDEX",
             "IF NOT EXISTS" if if_not_exists and self.index_exists else "",
-            self.escape_identifier(name),
+            self.escape_identifier(self._create_index_name(table, name)),
             "ON",
-            self.escape_identifier(table),
+            self.escape_identifier(self._create_index_table(table)),
             f"({self._escape_all(columns)})",
             self._build_clause("WHERE", params, where),
         )
@@ -269,11 +412,19 @@ class SQLDialect(DialectABC):
         query = _join(
             "DROP INDEX",
             "IF EXISTS" if if_exists and self.index_exists else "",
-            self.escape_identifier(name),
+            self.escape_identifier(name if self.DROP_INDEX_ON_TABLE else _qualified(table, name)),
             f"ON {self.escape_identifier(table)}" if self.DROP_INDEX_ON_TABLE else "",
         )
 
         return QueryWithParams(query)
+
+    def _create_index_name(self, table: IdentifierLike, name: str) -> IdentifierLike:
+        """The index name of ``CREATE INDEX``; unqualified, as the index lives in its table's schema."""
+        return name
+
+    def _create_index_table(self, table: IdentifierLike) -> IdentifierLike:
+        """The table of ``CREATE INDEX .. ON <table>``."""
+        return table
 
     # -- select clauses -----------------------------------------------------------------------------------------
 
@@ -465,14 +616,28 @@ class SQLDialect(DialectABC):
         return f"{column} {self._negation(condition)}LIKE {value}"
 
     def _build_condition_glob(self, params: list[Scalar], condition: Condition) -> str:
-        """``GLOB`` patterns are translated to ``LIKE`` patterns (``*`` -> ``%``, ``?`` -> ``_``)."""
-        like = replace(
+        """``GLOB`` patterns become ``LIKE`` patterns (``*`` -> ``%``, ``?`` -> ``_``, a one-character class such as
+        ``[*]`` -> the literal character); a pattern with any other character class becomes an anchored regex.
+
+        :raises QueryError: An unterminated ``[`` class, or regex flags the engine cannot express.
+        """
+        tokens = _glob_tokens(self._pattern(condition))
+        negated = condition.condition is ConditionEnum.NOT_GLOB
+        like = _glob_to_like(tokens)
+
+        if like is not None:
+            kind = ConditionEnum.NOT_LIKE if negated else ConditionEnum.LIKE
+
+            return self._build_condition_like(params, replace(condition, condition=kind, value=like))
+
+        regex = replace(
             condition,
-            condition=ConditionEnum.NOT_LIKE if condition.condition is ConditionEnum.NOT_GLOB else ConditionEnum.LIKE,
-            value=self._pattern(condition).translate(_GLOB_TO_LIKE),
+            condition=ConditionEnum.NOT_REGEX if negated else ConditionEnum.REGEX,
+            value=_glob_to_regex(tokens),
+            flags="is" if condition.case_insensitive else "s",
         )
 
-        return self._build_condition_like(params, like)
+        return self._build_condition_regex(params, regex)
 
     def _build_condition_in(self, params: list[Scalar], condition: Condition) -> str:
         """``<column> [NOT] IN (..)``; an empty list is always false (``IN``) or always true (``NOT IN``)."""
@@ -484,21 +649,28 @@ class SQLDialect(DialectABC):
         return self._build_condition_operator(params, condition)
 
     def _build_condition_regex(self, params: list[Scalar], condition: Condition) -> str:
-        """``[NOT ]regexp_like(<column>, <pattern>, <flags>)``."""
+        """``[NOT ]regexp_like(<column>, <pattern>, <flags>)`` with the flags of :meth:`_regex_flags`."""
         column = self._build_column_name(condition)
         pattern = self._build_value(params, condition.value)
-        flags = self._build_value(params, condition.flags)
+        flags = self._build_value(params, self._regex_flags(condition.flags))
 
         return f"{self._negation(condition)}regexp_like({column}, {pattern}, {flags})"
 
+    def _regex_flags(self, flags: str) -> str:
+        """The engine's flags for the portable regex ``flags``; by default the portable flags themselves.
+
+        :raises QueryError: A flag other than ``i``, ``m`` and ``s``.
+        """
+        return _portable_regex_flags(flags)
+
     def _build_condition_regex_operator(
-        self, params: list[Scalar], condition: Condition, operator: str, negated_operator: str
+        self, params: list[Scalar], condition: Condition, operator: str, negated_operator: str, flags: str
     ) -> str:
-        """``<column> <operator> <pattern>``, with the flags as an inline ``(?flags)`` prefix of the pattern."""
+        """``<column> <operator> <pattern>``, with the (engine) ``flags`` as an inline ``(?flags)`` prefix."""
         pattern = self._pattern(condition)
 
-        if condition.flags:
-            pattern = f"(?{condition.flags}){pattern}"
+        if flags:
+            pattern = f"(?{flags}){pattern}"
 
         operator = negated_operator if condition.condition is ConditionEnum.NOT_REGEX else operator
 
@@ -564,10 +736,6 @@ class SQLDialect(DialectABC):
 
     # -- insert -------------------------------------------------------------------------------------------------
 
-    def _build_insert_into(self, on_conflict: OnConflict | None, last_insert_id: str | None) -> str:
-        """The statement's leading keywords."""
-        return "INSERT INTO"
-
     def _build_row(self, params: list[Scalar], columns: Sequence[str], row: Mapping[str, Value]) -> str:
         """``(<value>, ..)`` in column order; a column missing from the row gets ``DEFAULT``."""
         return "(" + ", ".join(self._build_value(params, row[c]) if c in row else "DEFAULT" for c in columns) + ")"
@@ -579,34 +747,48 @@ class SQLDialect(DialectABC):
         columns: Sequence[str],
         last_insert_id: str | None,
     ) -> str:
-        """``ON CONFLICT (<columns>) | ON CONSTRAINT <name>`` + ``DO NOTHING | DO UPDATE SET ..``.
+        """``ON CONFLICT [(<columns>) | ON CONSTRAINT <name>]`` + ``DO NOTHING | DO UPDATE SET ..``.
 
-        Empty updates set every inserted column to its ``excluded`` value.
+        Empty updates set every inserted column to its ``excluded`` value. ``DO NOTHING`` without conflict columns
+        has no target, so it applies to every unique constraint.
+
+        :raises QueryError: ``DO UPDATE`` without conflict columns.
         """
         if on_conflict is None or not self.on_conflict:
             return ""
 
         if isinstance(on_conflict.conflict, str):
             target = f"ON CONSTRAINT {self.escape_identifier(on_conflict.conflict)}"
-        else:
+        elif on_conflict.conflict:
             target = f"({self._escape_all(on_conflict.conflict)})"
+        elif on_conflict.updates is None:
+            target = ""
+        else:
+            raise QueryError("ON CONFLICT DO UPDATE requires conflict columns or a constraint")
 
         if on_conflict.updates is None:
-            return f"ON CONFLICT {target} DO NOTHING"
+            return _join("ON CONFLICT", target, "DO NOTHING")
 
         updates = on_conflict.updates or {column: Identifier([Raw("excluded"), column]) for column in columns}
 
         return f"ON CONFLICT {target} DO UPDATE SET {self._build_set(params, updates)}"
 
-    def _build_returning(self, returning: Sequence[str] | None, statement: str = "", supported: bool = True) -> str:
-        """``RETURNING ..``; dropped from ``INSERT`` without support (the builder emulates it), an error elsewhere."""
-        if returning is not None and not supported:
-            raise QueryError(f"RETURNING is not supported on {statement}")
-
-        if returning is None or not self.returning:
+    def _build_returning(self, returning: Sequence[str] | None) -> str:
+        """``RETURNING <columns>`` (``RETURNING *`` when empty), or nothing for ``None``."""
+        if returning is None:
             return ""
 
         return f"RETURNING {self._escape_all(returning) if returning else '*'}"
+
+    def _require_returning(self, returning: Sequence[str] | None, statement: str, supported: bool) -> str:
+        """:meth:`_build_returning` for a statement whose ``RETURNING`` cannot be emulated.
+
+        :raises QueryError: ``returning`` is given but not ``supported``.
+        """
+        if returning is not None and not supported:
+            raise QueryError(f"RETURNING is not supported on {statement}")
+
+        return self._build_returning(returning)
 
     # -- table definitions --------------------------------------------------------------------------------------
 
@@ -748,12 +930,17 @@ class SQLDialect(DialectABC):
         return ".".join(self.escape_identifier(part) for part in identifier)
 
     def escape_string(self, string: str) -> str:
+        """The string quoted with :attr:`ESCAPE_STRING`, which is doubled inside it, and :attr:`ESCAPE_CHARS` applied.
+
+        The quote is never backslash escaped: a backslash escape can be read as a literal backslash (MySQL's
+        ``NO_BACKSLASH_ESCAPES``, PostgreSQL's ``standard_conforming_strings``), which would end the literal early.
+        """
         return self.ESCAPE_STRING + string.translate(self._string_translation) + self.ESCAPE_STRING
 
     @cached_property
     def _string_translation(self) -> dict[int, str]:
         quote = self.ESCAPE_STRING
-        replacements = {**self.ESCAPE_CHARS, quote: quote * 2 if self.ESCAPE_ANSI else "\\" + quote}
+        replacements = {**self.ESCAPE_CHARS, quote: quote * 2}
 
         return str.maketrans(replacements)
 

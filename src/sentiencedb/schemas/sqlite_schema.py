@@ -6,7 +6,6 @@ import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from ..queries.enums import TypeEnum
 from ..queries.helpers import raw
 from ..queries.objects.ddl import Column, Type, UniqueConstraint
 from . import _helpers
@@ -63,15 +62,11 @@ class SQLiteSchema(SchemaABC):
         return [row["name"] for row in rows]
 
     def columns(self, database: DatabaseABC, dialect: DialectABC, table: str) -> list[Column]:
-        """Only an ``INTEGER PRIMARY KEY AUTOINCREMENT`` column is ``generated_by_default_as_identity``."""
-        sql = (
-            database.select("sqlite_master")
-            .columns(["sql"])
-            .where_equals("type", "table")
-            .where_equals("name", table)
-            .execute()
-            .scalar()
-        )
+        """Only an ``INTEGER PRIMARY KEY AUTOINCREMENT`` column is ``generated_by_default_as_identity``. Table names
+        are matched case insensitively, as SQLite does."""
+        sql = database.prepared(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ? COLLATE NOCASE", [table]
+        ).scalar()
         autoincrement = bool(sql and _AUTOINCREMENT.search(sql))
         rows = database.prepared(
             'SELECT name, type, "notnull", dflt_value, pk FROM pragma_table_info(?) ORDER BY cid', [table]
@@ -126,29 +121,10 @@ class SQLiteSchema(SchemaABC):
         )
 
     def _type(self, sql_type: str) -> str | Type:
-        """The portable type of a declared column type, else the declared type as is."""
+        """The portable type of a declared column type (:func:`_helpers.portable_type`), else the declared type."""
         parts = _helpers.split_type(sql_type)
 
-        if parts is None:
-            return sql_type
-
-        match parts:
-            case ("BOOLEAN", _):
-                return Type(TypeEnum.BOOLEAN)
-            case ("INTEGER", _):
-                return Type(TypeEnum.INTEGER, 32)
-            case ("BIGINT", _):
-                return Type(TypeEnum.INTEGER, 64)
-            case ("REAL", _):
-                return Type(TypeEnum.FLOAT, 64)
-            case ("VARCHAR", size):
-                return Type(TypeEnum.VARCHAR, size)
-            case ("TEXT", size):
-                return Type(TypeEnum.TEXT, size)
-            case ("DATETIME", size):
-                return Type(TypeEnum.DATETIME, size)
-            case _:
-                return sql_type
+        return (_helpers.portable_type(*parts) if parts else None) or sql_type
 
 
 __all__ = ["SQLiteSchema"]

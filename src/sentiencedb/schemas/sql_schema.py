@@ -21,11 +21,13 @@ if TYPE_CHECKING:
 
 
 class SQLSchema(SchemaABC):
-    """Introspection through the ANSI ``information_schema`` views.
+    """Introspection through the ANSI ``information_schema`` views; a reusable base for engines that have them.
 
-    Subclasses scope the views to the current database / schema with :meth:`_schema_conditions`, pick the
-    ``information_schema.columns`` fields they read with ``_COLUMN_FIELDS`` and map engine types with :meth:`_type`.
-    Defaults are returned as :class:`Raw` SQL, so introspected columns can be fed back into ``CREATE TABLE``.
+    Every method works on a plain ``information_schema`` (``indexes`` falls back to the unique constraints). The
+    MySQL and PostgreSQL schemas override the parts their catalogs answer better. Subclasses scope the views to the
+    current database / schema with :meth:`_schema_conditions`, pick the ``information_schema.columns`` fields they
+    read with ``_COLUMN_FIELDS`` and map engine types with :meth:`_type`. Defaults are returned as :class:`Raw` SQL,
+    so introspected columns can be fed back into ``CREATE TABLE``.
     """
 
     _COLUMN_FIELDS: tuple[str, ...] = (
@@ -208,22 +210,12 @@ class SQLSchema(SchemaABC):
     def _type(self, type: str, size: int | None) -> Type | None:
         """The portable type of an upper case SQL type name and its size, or ``None`` to keep the raw type."""
         match type:
-            case "BOOLEAN":
-                return Type(TypeEnum.BOOLEAN)
-            case "INTEGER":
-                return Type(TypeEnum.INTEGER, 32)
-            case "BIGINT":
-                return Type(TypeEnum.INTEGER, 64)
-            case "REAL" | "FLOAT" | "DOUBLE" | "DECIMAL":
+            case "FLOAT" | "DOUBLE" | "DECIMAL":
                 return Type(TypeEnum.FLOAT, 64)
-            case "VARCHAR":
-                return Type(TypeEnum.VARCHAR, size)
-            case "TEXT":
-                return Type(TypeEnum.TEXT, size)
-            case "DATETIME" | "TIMESTAMP":
+            case "TIMESTAMP":
                 return Type(TypeEnum.DATETIME, size)
             case _:
-                return None
+                return _helpers.portable_type(type, size)
 
     def _default(self, row: Mapping[str, Any], dialect: DialectABC) -> Sql | None:
         default = row["column_default"]

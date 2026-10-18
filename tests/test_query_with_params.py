@@ -85,7 +85,7 @@ class TestToSql:
         assert query_with_params.to_sql(pgsql_dialect) == "SELECT FALSE, FALSE::int"
 
     def test_uses_the_dialect_string_escaping(self, mysql_dialect: MySQLDialect) -> None:
-        assert QueryWithParams("SELECT ?", ["a'b\\c"]).to_sql(mysql_dialect) == "SELECT 'a\\'b\\\\c'"
+        assert QueryWithParams("SELECT ?", ["a'b\\c"]).to_sql(mysql_dialect) == "SELECT 'a''b\\\\c'"
 
     def test_too_few_params_raises(self, sqlite_dialect: SQLiteDialect) -> None:
         with pytest.raises(QueryWithParamsError):

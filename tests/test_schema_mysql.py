@@ -151,7 +151,7 @@ def test_columns(db: Database) -> None:
         Column("views", Type(TypeEnum.INTEGER, 64)),
         Column("score", Type(TypeEnum.FLOAT, 64)),
         Column("created_at", Type(TypeEnum.DATETIME, 6), default=raw("CURRENT_TIMESTAMP(6)")),
-        Column("note", Type(TypeEnum.VARCHAR, 255), default=raw("'it\\'s'")),
+        Column("note", Type(TypeEnum.VARCHAR, 255), default=raw("'it''s'")),
         Column("price", "decimal(10,2)"),
     ]
 

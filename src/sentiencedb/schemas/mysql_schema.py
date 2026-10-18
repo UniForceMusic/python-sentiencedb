@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from ..queries.objects.sql import Sql
 
 _CURRENT_TIMESTAMP = re.compile(r"current_timestamp(\(\d*\))?", re.IGNORECASE)
+_BIT_LITERAL = re.compile(r"b'[01]*'", re.IGNORECASE)
+_HEX_LITERAL = re.compile(r"0x[0-9a-f]*", re.IGNORECASE)
+_BACKSLASH_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
 
 
 class MySQLSchema(SQLSchema):
@@ -36,7 +39,8 @@ class MySQLSchema(SQLSchema):
         self, database: DatabaseABC, dialect: DialectABC, table: str
     ) -> list[ForeignKeyConstraint]:
         """``KEY_COLUMN_USAGE`` names the referenced column itself (the referenced unique constraint is often called
-        ``PRIMARY``, in every table)."""
+        ``PRIMARY``, in every table). Its rows without a referenced table belong to a unique key, which MySQL lets
+        share its name with a foreign key."""
         query = (
             database.select(alias(raw("information_schema.key_column_usage"), "kcu"))
             .columns(
@@ -60,6 +64,7 @@ class MySQLSchema(SQLSchema):
         rows = (
             self._where_schema(query, "kcu")
             .where_equals(["kcu", "table_name"], table)
+            .where_is_not_null(["kcu", "referenced_table_name"])
             .order_by_asc(["kcu", "constraint_name"])
             .order_by_asc(["kcu", "ordinal_position"])
             .execute()
@@ -95,9 +100,13 @@ class MySQLSchema(SQLSchema):
         return self._parse_type(row["column_type"])
 
     def _type(self, type: str, size: int | None) -> Type | None:
+        """Only ``tinyint(1)`` is a boolean; ``timestamp`` stays raw, as a portable ``DATETIME`` would lose its time
+        zone conversion and range."""
         match type:
             case "TINYINT":
-                return Type(TypeEnum.BOOLEAN)
+                return Type(TypeEnum.BOOLEAN) if size == 1 else None
+            case "TIMESTAMP":
+                return None
             case "INT":
                 return Type(TypeEnum.INTEGER, 32)
             case "FLOAT":
@@ -116,8 +125,9 @@ class MySQLSchema(SQLSchema):
                 return super()._type(type, size)
 
     def _default(self, row: Mapping[str, Any], dialect: DialectABC) -> Sql | None:
-        """MySQL reports literal defaults unquoted and expressions (``DEFAULT_GENERATED``) without their
-        parentheses; MariaDB reports SQL, with ``NULL`` for no default."""
+        """MySQL reports literal defaults unquoted, ``BIT`` and binary defaults as ``b'..'`` / ``0x..`` literals, and
+        expressions (``DEFAULT_GENERATED``) without their parentheses and with their quotes backslash escaped;
+        MariaDB reports SQL, with ``NULL`` for no default."""
         default = row["column_default"]
 
         if default is None:
@@ -130,7 +140,16 @@ class MySQLSchema(SQLSchema):
             return raw(default)
 
         if "DEFAULT_GENERATED" in str(row["extra"]).upper():
-            return raw(f"({default})")
+            expression = _BACKSLASH_ESCAPE.sub(r"\1", default)
+
+            return raw(f"({expression})")
+
+        column_type = str(row["column_type"]).lower()
+
+        if (column_type.startswith("bit") and _BIT_LITERAL.fullmatch(default)) or (
+            column_type.startswith(("binary", "varbinary")) and _HEX_LITERAL.fullmatch(default)
+        ):
+            return raw(default)
 
         return raw(dialect.cast_to_query(default))
 

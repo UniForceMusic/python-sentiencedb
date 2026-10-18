@@ -6,8 +6,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ..queries.enums import ReferentialActionEnum
-from ..queries.objects.ddl import ForeignKeyConstraint, Index
+from ..queries.enums import ReferentialActionEnum, TypeEnum
+from ..queries.objects.ddl import ForeignKeyConstraint, Index, Type
 
 _TYPE = re.compile(r"(?P<name>[^()]*?)\s*(?:\(\s*(?P<size>\d+)\s*\))?(?P<suffix>[^()]*)")
 
@@ -25,6 +25,27 @@ def split_type(sql_type: str) -> tuple[str, int | None] | None:
     size = match["size"]
 
     return name, None if size is None else int(size)
+
+
+def portable_type(name: str, size: int | None) -> Type | None:
+    """The portable type of an upper case type name that means the same on every engine, or ``None``."""
+    match name:
+        case "BOOLEAN":
+            return Type(TypeEnum.BOOLEAN)
+        case "INTEGER":
+            return Type(TypeEnum.INTEGER, 32)
+        case "BIGINT":
+            return Type(TypeEnum.INTEGER, 64)
+        case "REAL":
+            return Type(TypeEnum.FLOAT, 64)
+        case "VARCHAR":
+            return Type(TypeEnum.VARCHAR, size)
+        case "TEXT":
+            return Type(TypeEnum.TEXT, size)
+        case "DATETIME":
+            return Type(TypeEnum.DATETIME, size)
+        case _:
+            return None
 
 
 def group_rows(rows: Iterable[Mapping[str, Any]], key: str) -> dict[Any, list[Mapping[str, Any]]]:
@@ -83,4 +104,4 @@ def _reference_table(row: Mapping[str, Any]) -> str | list[str]:
     return table if schema is None else [schema, table]
 
 
-__all__ = ["foreign_key_constraints", "group_rows", "indexes", "referential_action", "split_type"]
+__all__ = ["foreign_key_constraints", "group_rows", "indexes", "portable_type", "referential_action", "split_type"]

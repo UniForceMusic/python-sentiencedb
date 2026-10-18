@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..queries.type_aliases import IdentifierLike, Scalar, SelectColumn, TableRef, Value
 
 _VERSION_PATTERN = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+_MARIADB_PREFIX = re.compile(r"^\s*5\.5\.5-(?=\d)")
 
 
 def parse_version(version: int | str) -> int:
@@ -28,11 +29,14 @@ def parse_version(version: int | str) -> int:
     Integers are taken as already encoded. Strings are parsed from their first ``major[.minor[.patch]]`` run, so
     vendor suffixes are ignored: ``"3.45.1"`` -> ``34501``, ``"16.2 (Debian 16.2-1)"`` -> ``160200``,
     ``"8.0.34"`` -> ``80034``, ``"10.11.6-MariaDB-1:10.11.6+maria"`` -> ``101106``. Unparseable input gives ``0``.
+
+    MariaDB before 11.0 reports itself as ``5.5.5-<version>`` on the wire (a replication compatibility prefix); the
+    prefix is dropped, so ``"5.5.5-10.11.6-MariaDB"`` -> ``101106``.
     """
     if isinstance(version, int):
         return version
 
-    match = _VERSION_PATTERN.search(version)
+    match = _VERSION_PATTERN.search(_MARIADB_PREFIX.sub("", version))
 
     if match is None:
         return 0

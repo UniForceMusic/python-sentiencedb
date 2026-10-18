@@ -15,9 +15,9 @@ if TYPE_CHECKING:
     from ..queries.type_aliases import Scalar
 
 _SERIALS = {
-    "SMALLINT": "SERIAL",
+    "SMALLINT": "SMALLSERIAL",
+    "INT2": "SMALLSERIAL",
     "INT": "SERIAL",
-    "INT2": "SERIAL",
     "INT4": "SERIAL",
     "INTEGER": "SERIAL",
     "BIGINT": "BIGSERIAL",
@@ -25,20 +25,35 @@ _SERIALS = {
 }
 
 
+_REGEX_MODES = {(False, False): "p", (True, False): "s", (False, True): "n", (True, True): "w"}
+"""PostgreSQL's newline mode for the portable ``(s, m)`` flags: ``p`` keeps ``.`` from matching a newline, ``n`` also
+makes ``^``/``$`` match at line breaks, ``w`` only the latter; ``s`` is PostgreSQL's default."""
+
+
 class PgSQLDialect(SQLDialect):
-    """PostgreSQL. Assumes ``standard_conforming_strings = on`` (the default since 9.1)."""
+    """PostgreSQL.
+
+    String literals do not depend on ``standard_conforming_strings``: one with a backslash is written as an ``E''``
+    escape string.
+    """
 
     DATETIME_FORMAT: ClassVar[str] = "%Y-%m-%d %H:%M:%S.%f"
-    DISTINCT_ON: ClassVar[bool] = True
-    INDEX_EXISTS: ClassVar[bool] = True
-    TABLE_EXISTS: ClassVar[bool] = True
+
+    def escape_string(self, string: str) -> str:
+        """``'..'`` with ``''`` for a quote; ``E'..'`` with ``\\\\`` for a backslash when the string has one, which
+        reads the same whether ``standard_conforming_strings`` is on or off."""
+        if "\\" not in string:
+            return super().escape_string(string)
+
+        return "E" + super().escape_string(string.replace("\\", "\\\\"))
 
     def cast_datetime(self, value: datetime) -> str:
         """ISO format with microseconds, keeping the UTC offset of aware datetimes."""
         return value.isoformat(sep=" ", timespec="microseconds")
 
     def _bytes_literal(self, value: bytes) -> str:
-        return f"'\\x{value.hex()}'::bytea"
+        """``E'\\\\x<hex>'::bytea``, independent of ``standard_conforming_strings``."""
+        return f"E'\\\\x{value.hex()}'::bytea"
 
     def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:
         """``LIKE``, or ``ILIKE`` when case insensitive."""
@@ -52,10 +67,17 @@ class PgSQLDialect(SQLDialect):
         if self.version >= 150000 and not self.options.get("use_tilde_regex", False):
             return super()._build_condition_regex(params, condition)
 
-        return self._build_condition_regex_operator(params, condition, "~", "!~")
+        return self._build_condition_regex_operator(params, condition, "~", "!~", self._regex_flags(condition.flags))
+
+    def _regex_flags(self, flags: str) -> str:
+        """``i`` plus the newline mode of :data:`_REGEX_MODES`, so ``.`` only matches a newline with ``s``, as on
+        the other engines."""
+        flags = super()._regex_flags(flags)
+
+        return ("i" if "i" in flags else "") + _REGEX_MODES["s" in flags, "m" in flags]
 
     def _build_column(self, column: Column) -> str:
-        """Without identity column support, integer identity columns become ``SERIAL``/``BIGSERIAL``."""
+        """Without identity column support, integer identity columns become ``SMALLSERIAL``/``SERIAL``/``BIGSERIAL``."""
         if not column.generated_by_default_as_identity or self.generated_by_default_as_identity:
             return super()._build_column(column)
 
@@ -72,7 +94,8 @@ class PgSQLDialect(SQLDialect):
             case TypeEnum.FLOAT:
                 return "DOUBLE PRECISION" if (size or 0) > 32 else "REAL"
             case TypeEnum.DATETIME:
-                return "TIMESTAMP"
+                # 6 fractional digits is both the default and the maximum.
+                return f"TIMESTAMP({size})" if size is not None and size < 6 else "TIMESTAMP"
             case _:
                 return super().type(type, size)
 

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar
 
 from ..exceptions import QueryError
 from ..queries.enums import TypeEnum
-from .sql_dialect import SQLDialect
+from .sql_dialect import SQLDialect, _split_path
 
 if TYPE_CHECKING:
     from ..queries.objects.clauses import Condition, OnConflict, UnionClause
@@ -18,10 +19,11 @@ if TYPE_CHECKING:
         AddUniqueConstraint,
         AlterColumn,
         Column,
+        DropColumn,
         DropConstraint,
         RenameColumn,
     )
-    from ..queries.type_aliases import Scalar, Value
+    from ..queries.type_aliases import ConditionValue, IdentifierLike, Scalar, Value
 
 _LIKE_TOKEN = re.compile(r"\\(.)|[%_*?\[\]]", re.DOTALL)
 
@@ -42,14 +44,24 @@ def _like_to_glob(pattern: str) -> str:
     return _LIKE_TOKEN.sub(replace, pattern)
 
 
+_STRICT_TYPES = {
+    TypeEnum.BOOLEAN: "INTEGER",
+    TypeEnum.INTEGER: "INTEGER",
+    TypeEnum.FLOAT: "REAL",
+    TypeEnum.VARCHAR: "TEXT",
+    TypeEnum.TEXT: "TEXT",
+    TypeEnum.DATETIME: "TEXT",
+}
+"""Column types of ``STRICT`` tables, which only accept ``INT``, ``INTEGER``, ``REAL``, ``TEXT``, ``BLOB`` and
+``ANY``."""
+
+
 class SQLiteDialect(SQLDialect):
     """SQLite 3."""
 
     BOOLEAN: ClassVar[bool] = False
     GENERATED_BY_DEFAULT_AS_IDENTITY: ClassVar[bool] = False
-    INDEX_EXISTS: ClassVar[bool] = True
     LATERAL: ClassVar[bool] = False
-    TABLE_EXISTS: ClassVar[bool] = True
 
     def _build_unions(self, params: list[Scalar], query: str, unions: Sequence[UnionClause]) -> str:
         """SQLite rejects parenthesised compound members, so each member is wrapped as ``SELECT * FROM (<select>)``,
@@ -60,12 +72,18 @@ class SQLiteDialect(SQLDialect):
 
     def _build_condition_like(self, params: list[Scalar], condition: Condition) -> str:
         """Case sensitive ``LIKE`` becomes ``GLOB`` (SQLite's ``LIKE`` ignores ASCII case); case insensitive ``LIKE``
-        declares the backslash as its escape character."""
+        declares the backslash as its escape character, and compares through ``lower()`` when the
+        ``deprecated_case_sensitive_like`` option makes ``LIKE`` case sensitive."""
         column = self._build_column_name(condition)
         negation = self._negation(condition)
 
         if condition.case_insensitive:
-            return f"{column} {negation}LIKE {self._build_value(params, condition.value)} ESCAPE '\\'"
+            value = self._build_value(params, condition.value)
+
+            if self.options.get("deprecated_case_sensitive_like", False):
+                column, value = f"lower({column})", f"lower({value})"
+
+            return f"{column} {negation}LIKE {value} ESCAPE '\\'"
 
         return f"{column} {negation}GLOB {self._build_value(params, _like_to_glob(self._pattern(condition)))}"
 
@@ -84,7 +102,13 @@ class SQLiteDialect(SQLDialect):
         if not self.options.get("use_regexp", False):
             return super()._build_condition_regex(params, condition)
 
-        return self._build_condition_regex_operator(params, condition, "REGEXP", "NOT REGEXP")
+        flags = self._regex_flags(condition.flags)
+
+        return self._build_condition_regex_operator(params, condition, "REGEXP", "NOT REGEXP", flags)
+
+    def _cast_type(self, value: ConditionValue) -> str | None:
+        """Datetimes compare as ``TEXT``: a ``DATETIME`` cast has numeric affinity and keeps only the year."""
+        return "TEXT" if isinstance(value, datetime) else super()._cast_type(value)
 
     def _build_row(self, params: list[Scalar], columns: Sequence[str], row: Mapping[str, Value]) -> str:
         """SQLite has no ``DEFAULT`` keyword inside ``VALUES``.
@@ -127,7 +151,26 @@ class SQLiteDialect(SQLDialect):
         return ""
 
     def _build_table_options(self) -> str:
-        return "STRICT" if self.options.get("strict", False) else ""
+        """``STRICT`` with the ``strict`` option.
+
+        :raises QueryError: ``strict`` before SQLite 3.37.0.
+        """
+        if not self.options.get("strict", False):
+            return ""
+
+        if self.version < 33700:
+            raise QueryError("SQLite does not support STRICT tables before 3.37.0")
+
+        return "STRICT"
+
+    def _create_index_name(self, table: IdentifierLike, name: str) -> IdentifierLike:
+        """SQLite qualifies the index name with the schema: ``CREATE INDEX "s"."i" ON "t"``."""
+        schema, _ = _split_path(table)
+
+        return [*schema, name] if schema else name
+
+    def _create_index_table(self, table: IdentifierLike) -> IdentifierLike:
+        return _split_path(table)[1]
 
     def _build_alter_column(self, alter: AlterColumn) -> str:
         raise QueryError("SQLite does not support altering columns")
@@ -137,6 +180,12 @@ class SQLiteDialect(SQLDialect):
             raise QueryError("SQLite does not support renaming columns before 3.25.0")
 
         return super()._build_rename_column(alter)
+
+    def _build_drop_column(self, alter: DropColumn) -> str:
+        if self.version < 33500:
+            raise QueryError("SQLite does not support dropping columns before 3.35.0")
+
+        return super()._build_drop_column(alter)
 
     def _build_add_primary_keys(self, alter: AddPrimaryKeys) -> str:
         raise QueryError("SQLite does not support adding primary keys by altering the table")
@@ -151,6 +200,10 @@ class SQLiteDialect(SQLDialect):
         raise QueryError("SQLite does not support dropping constraints by altering the table")
 
     def type(self, type: TypeEnum, size: int | None = None) -> str:
+        """With the ``strict`` option, the types a ``STRICT`` table accepts (:data:`_STRICT_TYPES`)."""
+        if self.options.get("strict", False):
+            return _STRICT_TYPES[type]
+
         match type:
             case TypeEnum.BOOLEAN:
                 return "BOOLEAN"

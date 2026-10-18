@@ -52,12 +52,13 @@ class TestEscaping:
         """PHP escaped a backtick inside an identifier as ``\\```, which MySQL rejects (bug A2)."""
         assert mysql_dialect.select(table="we`ird", columns=["a\\b"]).query == "SELECT `a\\b` FROM `we``ird`"
 
-    def test_string_literals_use_single_quotes_and_backslashes(self, mysql_dialect: MySQLDialect) -> None:
+    def test_string_literals_double_quotes_and_escape_backslashes(self, mysql_dialect: MySQLDialect) -> None:
+        """A doubled quote cannot end the literal early, even under ``NO_BACKSLASH_ESCAPES``."""
         query_with_params = mysql_dialect.create_table(
             table="t", columns=[Column("a", Type(TypeEnum.VARCHAR), default='it\'s "x"\\')]
         )
 
-        assert query_with_params.query == "CREATE TABLE `t` (`a` VARCHAR(255) DEFAULT 'it\\'s \"x\"\\\\')"
+        assert query_with_params.query == "CREATE TABLE `t` (`a` VARCHAR(255) DEFAULT 'it''s \"x\"\\\\')"
         assert QueryWithParams("SELECT ?", [True]).to_sql(mysql_dialect) == "SELECT 1"
 
 
@@ -66,11 +67,11 @@ class TestConditions:
         assert where(mysql_dialect, Condition(ConditionEnum.LIKE, "c", "a%")) == ("`c` LIKE BINARY ?", ["a%"])
         assert where(mysql_dialect, Condition(ConditionEnum.NOT_LIKE, "c", "a%")) == ("`c` NOT LIKE BINARY ?", ["a%"])
         assert where(mysql_dialect, Condition(ConditionEnum.LIKE, "c", "a%", case_insensitive=True)) == (
-            "`c` LIKE ?",
+            "lower(convert(`c` USING utf8mb4)) LIKE lower(?)",
             ["a%"],
         )
         assert where(mysql_dialect, Condition(ConditionEnum.NOT_LIKE, "c", "a%", case_insensitive=True)) == (
-            "`c` NOT LIKE ?",
+            "lower(convert(`c` USING utf8mb4)) NOT LIKE lower(?)",
             ["a%"],
         )
 
@@ -89,10 +90,15 @@ class TestConditions:
             "NOT regexp_like(`c`, ?, 'ci')",
             ["^a"],
         )
-        assert where(mysql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m'")) == (
-            "regexp_like(`c`, ?, 'cm\\'')",
+        assert where(mysql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="ms")) == (
+            "regexp_like(`c`, ?, 'cmn')",
             ["^a"],
         )
+
+    @pytest.mark.parametrize("dialect", [mysql("8.4.3"), mysql("8.4.3", {"use_regexp": True}), mysql("5.7.44")])
+    def test_regex_flags_must_be_portable(self, dialect: MySQLDialect) -> None:
+        with pytest.raises(QueryError, match="unsupported regex flags"):
+            where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="m'"))
 
     @pytest.mark.parametrize("dialect", [mysql("8.4.3", {"use_regexp": True}), mariadb("11.4.4-MariaDB")])
     def test_regexp_operator(self, dialect: MySQLDialect) -> None:
@@ -102,11 +108,16 @@ class TestConditions:
         assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["(?-i)^a"])
 
     def test_regexp_operator_before_8_has_no_inline_flags(self) -> None:
+        """``.`` always matches a newline there, so ``s`` is dropped; other flags cannot be expressed."""
         assert where(mysql("5.7.44"), Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ("`c` NOT REGEXP ?", ["^a"])
+        assert where(mysql("5.7.44"), Condition(ConditionEnum.REGEX, "c", "^a", flags="s")) == ("`c` REGEXP ?", ["^a"])
+
+        with pytest.raises(QueryError, match=r"before 8\.0"):
+            where(mysql("5.7.44"), Condition(ConditionEnum.REGEX, "c", "^a", flags="i"))
 
     @pytest.mark.parametrize(
         ("value", "cast_type"),
-        [(True, "UNSIGNED"), (1, "SIGNED"), (1.5, "DECIMAL"), ("x", "CHAR"), (datetime(2024, 1, 2), "DATETIME(6)")],
+        [(True, "UNSIGNED"), (1, "SIGNED"), (1.5, "DOUBLE"), ("x", "CHAR"), (datetime(2024, 1, 2), "DATETIME(6)")],
     )
     def test_cast_types(self, mysql_dialect: MySQLDialect, value: Scalar, cast_type: str) -> None:
         assert where(mysql_dialect, Condition(ConditionEnum.EQUALS, "c", value, cast=True)) == (
@@ -135,11 +146,25 @@ class TestSelect:
 
 
 class TestInsert:
-    def test_do_nothing_is_insert_ignore(self, mysql_dialect: MySQLDialect) -> None:
-        query_with_params = mysql_dialect.insert(table="t", values=[{"a": 1}, {"a": 2}], on_conflict=OnConflict(["a"]))
+    def test_do_nothing_sets_the_conflict_column_to_itself(self, mysql_dialect: MySQLDialect) -> None:
+        """Not ``INSERT IGNORE``, which also turns NOT NULL and truncation errors into warnings."""
+        query_with_params = mysql_dialect.insert(
+            table="t", values=[{"a": 1, "b": 2}, {"a": 2, "b": 3}], on_conflict=OnConflict(["b"])
+        )
 
-        assert query_with_params.query == "INSERT IGNORE INTO `t` (`a`) VALUES (?), (?)"
-        assert list(query_with_params.params) == [1, 2]
+        assert (
+            query_with_params.query
+            == "INSERT INTO `t` (`a`, `b`) VALUES (?, ?), (?, ?) ON DUPLICATE KEY UPDATE `b` = `b`"
+        )
+        assert list(query_with_params.params) == [1, 2, 2, 3]
+
+    @pytest.mark.parametrize("conflict", ["uq_a", []])
+    def test_do_nothing_without_conflict_columns_uses_the_first_column(
+        self, mysql_dialect: MySQLDialect, conflict: str | list[str]
+    ) -> None:
+        query_with_params = mysql_dialect.insert(table="t", values=[{"a": 1}], on_conflict=OnConflict(conflict))
+
+        assert query_with_params.query == "INSERT INTO `t` (`a`) VALUES (?) ON DUPLICATE KEY UPDATE `a` = `a`"
 
     def test_do_nothing_with_last_insert_id(self, mysql_dialect: MySQLDialect) -> None:
         query_with_params = mysql_dialect.insert(
@@ -205,7 +230,7 @@ class TestCreateTable:
         )
 
         assert query_with_params.query == (
-            "CREATE TABLE IF NOT EXISTS `t` (`id` BIGINT NOT NULL AUTO_INCREMENT, `flag` TINYINT DEFAULT 1,"
+            "CREATE TABLE IF NOT EXISTS `t` (`id` BIGINT NOT NULL AUTO_INCREMENT, `flag` TINYINT(1) DEFAULT 1,"
             " PRIMARY KEY (`id`))"
         )
 

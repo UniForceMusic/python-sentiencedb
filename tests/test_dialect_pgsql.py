@@ -42,14 +42,16 @@ def pgsql(version: str, options: Options | None = None) -> PgSQLDialect:
 
 
 class TestEscaping:
-    def test_string_literals_double_quotes_and_keep_backslashes(self, pgsql_dialect: PgSQLDialect) -> None:
-        """PHP escaped PostgreSQL strings with backslashes, which PostgreSQL keeps literally (bug A1)."""
+    def test_string_literals_double_quotes_and_escape_backslashes(self, pgsql_dialect: PgSQLDialect) -> None:
+        """PHP escaped quotes with a backslash, which PostgreSQL keeps literally (bug A1). A string with a backslash
+        is an ``E''`` string, which reads the same whatever ``standard_conforming_strings`` is."""
         query_with_params = pgsql_dialect.create_table(
             table="t", columns=[Column("path", Type(TypeEnum.TEXT), default="C:\\dir\\it's\n")]
         )
 
-        assert query_with_params.query == "CREATE TABLE \"t\" (\"path\" TEXT DEFAULT 'C:\\dir\\it''s\n')"
-        assert QueryWithParams("SELECT ?", ["a\\'b"]).to_sql(pgsql_dialect) == "SELECT 'a\\''b'"
+        assert query_with_params.query == "CREATE TABLE \"t\" (\"path\" TEXT DEFAULT E'C:\\\\dir\\\\it''s\n')"
+        assert QueryWithParams("SELECT ?", ["a\\'b"]).to_sql(pgsql_dialect) == "SELECT E'a\\\\''b'"
+        assert QueryWithParams("SELECT ?", ["it's"]).to_sql(pgsql_dialect) == "SELECT 'it''s'"
 
     def test_identifiers_double_the_quote(self, pgsql_dialect: PgSQLDialect) -> None:
         assert pgsql_dialect.drop_table(table=["s", 'we"ird']).query == 'DROP TABLE "s"."we""ird"'
@@ -75,15 +77,24 @@ class TestConditions:
         )
 
     def test_regexp_like_from_15(self, pgsql_dialect: PgSQLDialect) -> None:
+        """Without ``s``, ``.`` does not match a newline (mode ``p``), as on the other engines."""
         assert where(pgsql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="i")) == (
             'regexp_like("c", ?, ?)',
-            ["^a", "i"],
+            ["^a", "ip"],
         )
+
+    @pytest.mark.parametrize(("flags", "expected"), [("", "p"), ("s", "s"), ("m", "n"), ("ms", "w"), ("sim", "iw")])
+    def test_regex_newline_modes(self, pgsql_dialect: PgSQLDialect, flags: str, expected: str) -> None:
+        assert where(pgsql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags=flags))[1] == ["^a", expected]
+
+    def test_regex_flags_must_be_portable(self, pgsql_dialect: PgSQLDialect) -> None:
+        with pytest.raises(QueryError, match="unsupported regex flags 'x'"):
+            where(pgsql_dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="x"))
 
     @pytest.mark.parametrize("dialect", [pgsql("14.10"), pgsql("18.0", {"use_tilde_regex": True})])
     def test_tilde_operators(self, dialect: PgSQLDialect) -> None:
-        assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="i")) == ('"c" ~ ?', ["(?i)^a"])
-        assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ('"c" !~ ?', ["^a"])
+        assert where(dialect, Condition(ConditionEnum.REGEX, "c", "^a", flags="i")) == ('"c" ~ ?', ["(?ip)^a"])
+        assert where(dialect, Condition(ConditionEnum.NOT_REGEX, "c", "^a")) == ('"c" !~ ?', ["(?p)^a"])
 
     def test_cast_types(self, pgsql_dialect: PgSQLDialect) -> None:
         assert where(pgsql_dialect, Condition(ConditionEnum.EQUALS, "c", 1.5, cast=True)) == (
@@ -195,7 +206,7 @@ class TestCreateTable:
         )
 
         assert query_with_params.query == (
-            'CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL NOT NULL, "n" SERIAL, "s" serial, "b" bigserial,'
+            'CREATE TABLE IF NOT EXISTS "t" ("id" BIGSERIAL NOT NULL, "n" SERIAL, "s" smallserial, "b" bigserial,'
             ' "u" UUID, PRIMARY KEY ("id"))'
         )
 
@@ -215,6 +226,7 @@ class TestCreateTable:
             columns=[
                 Column("flag", Type(TypeEnum.BOOLEAN), not_null=True, default=False),
                 Column("at", Type(TypeEnum.DATETIME, 6), default=datetime(2024, 1, 2)),
+                Column("ms", Type(TypeEnum.DATETIME, 3)),
                 Column("bin", "BYTEA", default=b"\x01"),
             ],
             constraints=[UniqueConstraint(["flag"], "uq")],
@@ -222,7 +234,8 @@ class TestCreateTable:
 
         assert query_with_params.query == (
             'CREATE TABLE "t" ("flag" BOOLEAN NOT NULL DEFAULT FALSE,'
-            " \"at\" TIMESTAMP DEFAULT '2024-01-02 00:00:00.000000', \"bin\" BYTEA DEFAULT '\\x01'::bytea,"
+            ' "at" TIMESTAMP DEFAULT \'2024-01-02 00:00:00.000000\', "ms" TIMESTAMP(3),'
+            " \"bin\" BYTEA DEFAULT E'\\\\x01'::bytea,"
             ' CONSTRAINT "uq" UNIQUE ("flag"))'
         )
 
