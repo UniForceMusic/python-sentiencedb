@@ -39,7 +39,7 @@ Repository = "https://github.com/UniForceMusic/python-sentiencedb"
 Changelog = "https://github.com/UniForceMusic/python-sentiencedb/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-# Both drivers are regular dependencies since 2.1.0; these extras stay (empty) so existing
+# Both drivers are regular dependencies since 2.0.1; these extras stay (empty) so existing
 # `pip install "sentiencedb[postgres]"` / `"sentiencedb[mysql]"` commands keep working.
 postgres = []
 mysql = []
