@@ -22,7 +22,7 @@ class AdapterABC(ABC):
 
     * **Connections are per thread.** Each thread lazily opens its own driver connection and keeps it until the
       thread exits or calls :meth:`release_connection`. The constructor connects eagerly so configuration errors
-      surface in :meth:`Database.connect`; with ``max_connections`` that first connection is released right away so
+      surface in :func:`~sentiencedb.connect`; with ``max_connections`` that first connection is released right away so
       it does not hold a slot. ``max_connections`` caps the number of open connections and ``acquire_timeout``
       bounds the wait for a free slot. :meth:`close` closes all of them.
     * **Autocommit.** Every statement commits immediately unless a transaction was started with

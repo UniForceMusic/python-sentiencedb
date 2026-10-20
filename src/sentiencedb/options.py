@@ -20,7 +20,7 @@ raised by the callback is reported as a ``RuntimeWarning`` and never fails the s
 
 
 class Options(TypedDict, total=False):
-    """Options accepted by :meth:`sentiencedb.Database.connect`. Every key is optional."""
+    """Options accepted by :func:`sentiencedb.connect`. Every key is optional."""
 
     # -- threading (all adapters) -------------------------------------------------------------------
     max_connections: int

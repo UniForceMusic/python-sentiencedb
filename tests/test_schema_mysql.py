@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from sentiencedb import Database, ReferentialActionEnum, current_timestamp, raw
+from sentiencedb import Database, ReferentialActionEnum, connect_mysql, current_timestamp, raw
 from sentiencedb.queries.enums import TypeEnum
 from sentiencedb.queries.objects.ddl import Column, ForeignKeyConstraint, Index, Type, UniqueConstraint
 
@@ -42,7 +42,7 @@ def admin() -> Iterator[Database]:
     if not server_is_up(3306):
         pytest.skip("MySQL is not reachable on localhost:3306")
 
-    with Database.connect_mysql("mysql", username="root") as admin:
+    with connect_mysql("mysql", username="root") as admin:
         for database in (DATABASE, OTHER_DATABASE):
             admin.exec(f"DROP DATABASE IF EXISTS {database}")
             admin.exec(f"CREATE DATABASE {database}")
@@ -55,7 +55,7 @@ def admin() -> Iterator[Database]:
 
 @pytest.fixture
 def db(admin: Database) -> Iterator[Database]:
-    with Database.connect_mysql(DATABASE, username="root") as db:
+    with connect_mysql(DATABASE, username="root") as db:
         create_tables(db)
         yield db
 

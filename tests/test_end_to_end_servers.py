@@ -29,6 +29,9 @@ from sentiencedb import (
     UniqueViolationError,
     WhereGroup,
     alias,
+    connect_mariadb,
+    connect_mysql,
+    connect_postgresql,
     current_timestamp,
     identifier,
     raw,
@@ -61,9 +64,9 @@ class Backend:
         self, name: str = DATABASE, options: Options | None = None, debug: DebugCallback | None = None
     ) -> Database:
         connect = {
-            Driver.PGSQL: Database.connect_postgresql,
-            Driver.MYSQL: Database.connect_mysql,
-            Driver.MARIADB: Database.connect_mariadb,
+            Driver.PGSQL: connect_postgresql,
+            Driver.MYSQL: connect_mysql,
+            Driver.MARIADB: connect_mariadb,
         }[self.driver]
 
         return connect(name, port=self.port, username=self.username, options=options, debug=debug)

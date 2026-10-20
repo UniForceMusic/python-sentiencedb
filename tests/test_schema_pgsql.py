@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from sentiencedb import Database, ReferentialActionEnum, current_timestamp, raw
+from sentiencedb import Database, ReferentialActionEnum, connect_postgresql, current_timestamp, raw
 from sentiencedb.options import Options
 from sentiencedb.queries.enums import TypeEnum
 from sentiencedb.queries.objects.ddl import Column, ForeignKeyConstraint, Index, Type, UniqueConstraint
@@ -44,7 +44,7 @@ def admin() -> Iterator[Database]:
     if not server_is_up(5432):
         pytest.skip("PostgreSQL is not reachable on localhost:5432")
 
-    with Database.connect_postgresql("postgres", username="postgres") as admin:
+    with connect_postgresql("postgres", username="postgres") as admin:
         for schema in (SCHEMA, OTHER_SCHEMA):
             admin.exec(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
             admin.exec(f"CREATE SCHEMA {schema}")
@@ -56,9 +56,7 @@ def admin() -> Iterator[Database]:
 
 
 def connect(options: Options | None = None) -> Database:
-    return Database.connect_postgresql(
-        "postgres", username="postgres", options={"search_path": SCHEMA, **(options or {})}
-    )
+    return connect_postgresql("postgres", username="postgres", options={"search_path": SCHEMA, **(options or {})})
 
 
 @pytest.fixture

@@ -18,6 +18,7 @@ from sentiencedb import (
     UniqueViolationError,
     WhereGroup,
     alias,
+    connect_sqlite,
     current_timestamp,
     identifier,
     raw,
@@ -33,7 +34,7 @@ USERS: list[dict[str, Any]] = [
 
 @pytest.fixture
 def db() -> Iterator[Database]:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         db.create_table("users").identity("id").varchar("name", not_null=True).varchar("email").integer(
             "age", 32
         ).boolean("active", default=False).datetime("created_at", default=current_timestamp()).unique_constraint(

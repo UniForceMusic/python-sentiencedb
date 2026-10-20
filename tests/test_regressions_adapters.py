@@ -22,6 +22,7 @@ from unittest.mock import create_autospec
 
 import pytest
 
+import sentiencedb
 from sentiencedb import (
     AdapterError,
     Database,
@@ -31,6 +32,10 @@ from sentiencedb import (
     NotNullViolationError,
     OperationalError,
     UniqueViolationError,
+    connect_mariadb,
+    connect_mysql,
+    connect_postgresql,
+    connect_sqlite,
 )
 from sentiencedb.adapters._thread_local_store import ThreadLocalStore
 from sentiencedb.adapters.adapter_abc import AdapterABC
@@ -67,7 +72,7 @@ def run_in_thread(function: Callable[[], Any]) -> Any:
 
 @pytest.fixture
 def file_db(tmp_path: Path) -> Iterator[Database]:
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), options={"busy_timeout": 200}) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), options={"busy_timeout": 200}) as db:
         db.exec("CREATE TABLE t (id INTEGER)")
         yield db
 
@@ -194,7 +199,7 @@ def test_nesting_without_savepoint_support_raises() -> None:
 def test_commit_and_rollback_by_savepoint_name(tmp_path: Path) -> None:
     statements: list[str] = []
 
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), debug=lambda q, s, e: statements.append(q)) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), debug=lambda q, s, e: statements.append(q)) as db:
         db.exec("CREATE TABLE t (id INTEGER)")
         db.begin_transaction()
         db.begin_transaction("a")
@@ -223,7 +228,7 @@ def test_commit_and_rollback_by_savepoint_name(tmp_path: Path) -> None:
 def test_debug_with_values_without_a_literal_does_not_fail_the_statement() -> None:
     log: list[tuple[str, str | None]] = []
 
-    with Database.connect_sqlite(debug=lambda q, s, e: log.append((q, e))) as db:
+    with connect_sqlite(debug=lambda q, s, e: log.append((q, e))) as db:
         db.exec("CREATE TABLE t (x REAL)")
         db.prepared("INSERT INTO t VALUES (?)", [float("inf")])
 
@@ -241,7 +246,7 @@ def test_debug_sees_errors_raised_while_computing_rows() -> None:
     options: Any = {"create_functions": {"boom": lambda v: 1 // (v - 2)}}
 
     with (
-        Database.connect_sqlite(debug=lambda q, s, e: log.append(e), options=options) as db,
+        connect_sqlite(debug=lambda q, s, e: log.append(e), options=options) as db,
         pytest.raises(DriverError),
     ):
         db.query("SELECT boom(value) AS b FROM (SELECT 1 AS value UNION ALL SELECT 2)")
@@ -253,7 +258,7 @@ def test_debug_sees_errors_raised_while_computing_rows() -> None:
 
 
 def test_shared_memory_transactions_do_not_mix() -> None:
-    with Database.connect_sqlite(":memory:") as db:
+    with connect_sqlite(":memory:") as db:
         db.exec("CREATE TABLE t (who TEXT)")
         a_inside = threading.Event()
         b_started = threading.Event()
@@ -290,7 +295,7 @@ def test_shared_memory_transactions_do_not_mix() -> None:
 
 
 def test_shared_memory_statements_of_other_threads_wait_for_the_transaction() -> None:
-    with Database.connect_sqlite(":memory:") as db:
+    with connect_sqlite(":memory:") as db:
         db.exec("CREATE TABLE t (who TEXT)")
         db.begin_transaction()
         db.exec("INSERT INTO t VALUES ('main')")
@@ -311,14 +316,14 @@ def test_shared_memory_statements_of_other_threads_wait_for_the_transaction() ->
 
 @pytest.mark.parametrize("emulate_prepare", [False, True])
 def test_sqlite_stores_aware_datetimes_in_utc(emulate_prepare: bool) -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         value = db.prepared("SELECT ? AS v", [AWARE], emulate_prepare).scalar()
 
     assert value == "2024-01-01 10:00:00"  # UTC, second precision
 
 
 def test_enum_members_are_bound_by_value() -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         assert db.prepared("SELECT ? AS v", [Color.RED]).scalar() == "red"  # type: ignore[list-item]
         assert db.prepared("SELECT :c AS v", {"c": Color.RED}).scalar() == "red"  # type: ignore[dict-item]
 
@@ -367,7 +372,7 @@ def test_shared_store_never_releases() -> None:
 def test_connect_does_not_pin_a_slot(tmp_path: Path) -> None:
     options: Any = {"max_connections": 1, "acquire_timeout": 0.5}
 
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
         assert len(db._adapter._connections) == 0  # type: ignore[attr-defined]
         assert run_in_thread(lambda: db.query("SELECT 1 AS one").scalar()) == 1
 
@@ -375,7 +380,7 @@ def test_connect_does_not_pin_a_slot(tmp_path: Path) -> None:
 def test_thread_pool_with_more_workers_than_connections(tmp_path: Path) -> None:
     options: Any = {"max_connections": 2, "acquire_timeout": 10, "journal_mode": "WAL"}
 
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
         with db.connection():
             db.exec("CREATE TABLE t (id INTEGER)")
 
@@ -418,7 +423,7 @@ def test_connection_context_keeps_an_open_transaction_and_nests(file_db: Databas
 
 
 def test_in_memory_connection_is_never_released() -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         db.exec("CREATE TABLE t (id INTEGER)")
         db.release_connection()
 
@@ -429,7 +434,7 @@ def test_in_memory_connection_is_never_released() -> None:
 
 
 def test_sqlite_last_insert_id_is_none_before_any_insert() -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         assert db.last_insert_id() is None
 
 
@@ -441,7 +446,7 @@ def test_missing_driver_package_names_it(monkeypatch: pytest.MonkeyPatch, method
         monkeypatch.setitem(sys.modules, module, None)
 
     with pytest.raises(AdapterError, match=rf"^{package} could not be imported.*reinstall sentiencedb") as error:
-        getattr(Database, method)("x")
+        getattr(sentiencedb, method)("x")
 
     assert isinstance(error.value.__cause__, ImportError)
     assert error.value.__cause__.__context__ is None
@@ -460,9 +465,9 @@ def server_is_up(port: int) -> bool:
 
 
 SERVERS = {
-    "pgsql": (Database.connect_postgresql, 5432, "postgres", "postgres", "psycopg"),
-    "mysql": (Database.connect_mysql, 3306, "mysql", "root", "mysql.connector"),
-    "mariadb": (Database.connect_mariadb, 3307, "mysql", "root", "mysql.connector"),
+    "pgsql": (connect_postgresql, 5432, "postgres", "postgres", "psycopg"),
+    "mysql": (connect_mysql, 3306, "mysql", "root", "mysql.connector"),
+    "mariadb": (connect_mariadb, 3307, "mysql", "root", "mysql.connector"),
 }
 
 
@@ -610,7 +615,7 @@ def test_server_thread_pool_with_more_workers_than_connections(pg: Database) -> 
     options: Any = {"max_connections": 2, "acquire_timeout": 10}
     backend_ids: set[int] = set()
 
-    with Database.connect_postgresql(DATABASE, username="postgres", options=options) as db:
+    with connect_postgresql(DATABASE, username="postgres", options=options) as db:
 
         def job(number: int) -> None:
             with db.connection():

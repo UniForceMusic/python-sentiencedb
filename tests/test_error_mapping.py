@@ -7,7 +7,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from sentiencedb import Database
+from sentiencedb import Database, connect_sqlite
 from sentiencedb.adapters._errors import map_mysql_connector_error, map_psycopg_error, map_sqlite3_error
 from sentiencedb.exceptions import (
     CheckViolationError,
@@ -28,7 +28,7 @@ from sentiencedb.exceptions import (
 
 @pytest.fixture
 def db() -> Iterator[Database]:
-    with Database.connect_sqlite(options={"foreign_keys": True}) as db:
+    with connect_sqlite(options={"foreign_keys": True}) as db:
         db.exec("CREATE TABLE parents (id INTEGER PRIMARY KEY)")
         db.exec(
             "CREATE TABLE children (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL CHECK (name <> ''),"
@@ -90,7 +90,7 @@ def test_debug_callback_exceptions_become_warnings() -> None:
     def debug(query: str, start: float, error: str | None) -> None:
         raise ValueError(query)
 
-    with Database.connect_sqlite(debug=debug) as db:
+    with connect_sqlite(debug=debug) as db:
         with pytest.warns(RuntimeWarning, match="SELECT 1"):
             assert db.query("SELECT 1 AS one").scalar() == 1
 

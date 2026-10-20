@@ -8,8 +8,9 @@ from unittest.mock import MagicMock, call, create_autospec
 
 import pytest
 
+import sentiencedb.connection as connection_module
 import sentiencedb.database as database_module
-from sentiencedb import Database, Driver, NetworkSocket, UnixSocket
+from sentiencedb import Database, Driver, NetworkSocket, UnixSocket, connect, connect_sqlite
 from sentiencedb.adapters import SQLite3Adapter
 from sentiencedb.dialects import SQLiteDialect
 from sentiencedb.exceptions import AdapterError
@@ -26,7 +27,7 @@ def statements() -> list[str]:
 
 @pytest.fixture
 def db(statements: list[str]) -> Iterator[Database]:
-    with Database.connect_sqlite(debug=lambda query, start, error: statements.append(query)) as db:
+    with connect_sqlite(debug=lambda query, start, error: statements.append(query)) as db:
         db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
         statements.clear()
         yield db
@@ -44,7 +45,7 @@ def test_connect_sqlite_builds_the_sqlite_stack(db: Database) -> None:
 
 
 def test_connect_passes_queries_and_options(tmp_path: Path) -> None:
-    with Database.connect(
+    with connect(
         Driver.SQLITE, str(tmp_path / "db.sqlite"), queries=["CREATE TABLE t (id INTEGER)"], options={"strict": True}
     ) as db:
         assert db.query("SELECT count(*) FROM t").scalar() == 0
@@ -61,11 +62,11 @@ def test_connect_passes_queries_and_options(tmp_path: Path) -> None:
 )
 def test_server_helpers_build_sockets(monkeypatch: pytest.MonkeyPatch, method: str, driver: Driver, port: int) -> None:
     connect = MagicMock()
-    monkeypatch.setattr(Database, "connect", connect)
+    monkeypatch.setattr(connection_module, "connect", connect)
     options = {"charset": "utf8mb4"}
 
-    getattr(Database, method)("app", username="user", password="secret", queries=["SELECT 1"], options=options)
-    getattr(Database, method)("app", host="db", port=1, unix_socket="/run/db.sock")
+    getattr(connection_module, method)("app", username="user", password="secret", queries=["SELECT 1"], options=options)
+    getattr(connection_module, method)("app", host="db", port=1, unix_socket="/run/db.sock")
 
     assert connect.call_args_list[0].args == (
         driver,
@@ -206,7 +207,7 @@ def test_nested_transaction_rolls_back_only_the_inner_part(db: Database) -> None
 
 
 def test_close_and_context_manager() -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         assert db.query("SELECT 1").scalar() == 1
 
     with pytest.raises(AdapterError):

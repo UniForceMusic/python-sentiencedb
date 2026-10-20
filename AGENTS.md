@@ -27,7 +27,7 @@ All of these must pass before handing work back. No Makefile, CI or pre-commit h
 ## Architecture (`src/sentiencedb/`)
 
 ```
-Database.connect(driver, name, socket, queries, options, debug)
+connect(driver, name, socket, queries, options, debug)
   adapter = driver.adapter(...)                      # connects eagerly in the calling thread
   dialect = driver.dialect(adapter.version(), options)
   schema  = driver.schema()
@@ -36,6 +36,8 @@ db.select("t").where_equals("id", 1).execute()
   -> adapter (no params: plain SQL; params: dialect.cast_to_driver + placeholder conversion) -> ResultABC
 ```
 
+- `connection.py`: the module-level `connect()` and `connect_{sqlite,postgresql,mysql,mariadb}()` functions (the PHP
+  static constructors; `Database` has no static or class methods).
 - `database.py` / `database_abc.py`: the `Database` facade (raw SQL, transactions with a per-thread savepoint stack,
   builder factories, `information_schema_*`).
 - `driver.py`: `Driver` StrEnum (`MARIADB`, `MYSQL`, `PGSQL`, `SQLITE`) with lazy `adapter()` / `dialect()` /

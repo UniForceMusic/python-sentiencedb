@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from sentiencedb import Database
+from sentiencedb import Database, connect_sqlite
 from sentiencedb.adapters._thread_local_store import ThreadLocalStore
 from sentiencedb.exceptions import AdapterError, ConnectionLimitError
 
@@ -159,7 +159,7 @@ def test_closed_store_disposes_of_everything(values: Values) -> None:
 
 @pytest.fixture
 def file_db(tmp_path: Path) -> Iterator[Database]:
-    with Database.connect_sqlite(str(tmp_path / "threads.sqlite"), queries=["CREATE TEMP TABLE marker (x)"]) as db:
+    with connect_sqlite(str(tmp_path / "threads.sqlite"), queries=["CREATE TEMP TABLE marker (x)"]) as db:
         db.exec("CREATE TABLE users (name TEXT)")
         yield db
 
@@ -196,7 +196,7 @@ def test_savepoint_stacks_belong_to_their_thread(tmp_path: Path) -> None:
         db.commit_transaction()
         db.commit_transaction()
 
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), debug=lambda q, s, e: statements.append(q)) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), debug=lambda q, s, e: statements.append(q)) as db:
         threads = [threading.Thread(target=nest, args=(db,)) for _ in range(2)]
 
         for thread in threads:
@@ -213,7 +213,7 @@ def test_savepoint_stacks_belong_to_their_thread(tmp_path: Path) -> None:
 def test_connection_cap(tmp_path: Path) -> None:
     options: Any = {"max_connections": 1, "acquire_timeout": 0.01}
 
-    with Database.connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
+    with connect_sqlite(str(tmp_path / "db.sqlite"), options=options) as db:
         db.query("SELECT 1")  # the main thread holds the only slot from here on
 
         with pytest.raises(ConnectionLimitError):
@@ -231,7 +231,7 @@ def test_connections_of_finished_threads_are_closed(file_db: Database) -> None:
 
 
 def test_in_memory_database_is_shared_by_every_thread() -> None:
-    with Database.connect_sqlite(":memory:") as db:
+    with connect_sqlite(":memory:") as db:
         db.exec("CREATE TABLE numbers (n INTEGER)")
         threads = [
             threading.Thread(target=lambda n=n: db.prepared("INSERT INTO numbers VALUES (?)", [n])) for n in range(20)

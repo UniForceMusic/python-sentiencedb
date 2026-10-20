@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from sentiencedb import Database, Driver, QueryError
+from sentiencedb import Database, Driver, QueryError, connect_mariadb, connect_mysql, connect_postgresql, connect_sqlite
 from sentiencedb.dialects import MySQLDialect, PgSQLDialect, SQLDialect, SQLiteDialect
 from sentiencedb.exceptions import DriverError
 from sentiencedb.queries.enums import ConditionEnum, TypeEnum
@@ -209,9 +209,9 @@ def _server_is_up(port: int) -> bool:
 def _connect(driver: Driver, name: str = DATABASE, **kwargs: Any) -> Database:
     port, _, username, _ = SERVERS[driver]
     connect = {
-        Driver.PGSQL: Database.connect_postgresql,
-        Driver.MYSQL: Database.connect_mysql,
-        Driver.MARIADB: Database.connect_mariadb,
+        Driver.PGSQL: connect_postgresql,
+        Driver.MYSQL: connect_mysql,
+        Driver.MARIADB: connect_mariadb,
     }[driver]
 
     return connect(name, port=port, username=kwargs.pop("username", username), **kwargs)
@@ -247,7 +247,7 @@ def connect(driver: Driver) -> Iterator[Callable[..., Database]]:
     opened: list[Database] = []
 
     def open_database(**kwargs: Any) -> Database:
-        db = Database.connect_sqlite(":memory:", **kwargs) if driver is Driver.SQLITE else _connect(driver, **kwargs)
+        db = connect_sqlite(":memory:", **kwargs) if driver is Driver.SQLITE else _connect(driver, **kwargs)
         opened.append(db)
 
         return db
@@ -364,7 +364,7 @@ GLOB_PATTERNS += ["[a-c-e]", "*[\n]*", "[A-Z]", "a*", "?", "*"]
 def test_m4_glob_matches_sqlite(db: Database, case_insensitive: bool) -> None:
     """SQLite's native ``GLOB`` is the oracle for the translation on the other engines. Case insensitive matching of
     non-ASCII text follows each engine's collation (MySQL's also ignores accents), so it is compared on ASCII only."""
-    oracle = Database.connect_sqlite(":memory:")
+    oracle = connect_sqlite(":memory:")
     compared = {index for index, value in enumerate(GLOB_VALUES) if value.isascii() or not case_insensitive}
 
     def matches(query: Any, emulate_prepare: bool = False) -> list[int]:
@@ -392,7 +392,7 @@ def test_m4_glob_matches_sqlite(db: Database, case_insensitive: bool) -> None:
 
 
 def test_m5_strict_tables_accept_every_portable_type() -> None:
-    db = Database.connect_sqlite(":memory:", options={"strict": True})
+    db = connect_sqlite(":memory:", options={"strict": True})
     (
         db.create_table("t")
         .identity("id")
@@ -472,7 +472,7 @@ def test_m8_mysql_defaults_round_trip(db: Database) -> None:
 
 
 def test_l1_sqlite_case_sensitive_like_option() -> None:
-    db = Database.connect_sqlite(":memory:", options={"deprecated_case_sensitive_like": True})
+    db = connect_sqlite(":memory:", options={"deprecated_case_sensitive_like": True})
     db.create_table("t").integer("id").varchar("v").execute()
     db.insert("t").values({"id": 1, "v": "Alice"}).execute()
 
@@ -524,7 +524,7 @@ def test_l4_index_in_another_schema(db: Database) -> None:
 
 
 def test_l7_sqlite_identity_whatever_the_table_name_case() -> None:
-    db = Database.connect_sqlite(":memory:")
+    db = connect_sqlite(":memory:")
     db.create_table("users").identity("id").varchar("name").execute()
 
     assert [column.generated_by_default_as_identity for column in db.information_schema_columns("USERS")] == [

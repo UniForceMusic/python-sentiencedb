@@ -2,9 +2,9 @@
 
 A Python port of the PHP package ``sentience/database``::
 
-    from sentiencedb import Database
+    from sentiencedb import connect_sqlite
 
-    db = Database.connect_sqlite(":memory:")
+    db = connect_sqlite(":memory:")
     rows = db.select("users").where_equals("name", "Alice").execute().fetch_dicts()
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from importlib.metadata import version as _version
 
+from .connection import connect, connect_mariadb, connect_mysql, connect_postgresql, connect_sqlite
 from .database import Database
 from .database_abc import DatabaseABC
 from .driver import Driver
@@ -131,6 +132,11 @@ __all__ = [
     "WhereGroup",
     "__version__",
     "alias",
+    "connect",
+    "connect_mariadb",
+    "connect_mysql",
+    "connect_postgresql",
+    "connect_sqlite",
     "current_timestamp",
     "escape_ansi",
     "escape_backslash",

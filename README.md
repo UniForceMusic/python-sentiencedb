@@ -57,9 +57,9 @@ Driver packages are imported lazily: `import sentiencedb` does not load them; co
 ## Quick start
 
 ```python
-from sentiencedb import Database
+from sentiencedb import connect_sqlite
 
-db = Database.connect_sqlite(":memory:")
+db = connect_sqlite(":memory:")
 
 db.create_table("users").identity("id").varchar("name", not_null=True).integer("age").execute()
 
@@ -75,10 +75,10 @@ Everything public is importable from the top-level `sentiencedb` package.
 
 ## Connecting
 
-### `Database.connect()`
+### `connect()`
 
 ```text
-Database.connect(
+connect(
     driver: Driver,                 # Driver.SQLITE, Driver.PGSQL, Driver.MYSQL or Driver.MARIADB
     name: str,                      # database name, or the SQLite file path / ":memory:"
     socket: SocketABC | None = None,  # where the server is; required for every engine except SQLite
@@ -92,18 +92,18 @@ Database.connect(
 configuration errors surface here as `ConnectionFailedError` (or `AdapterError` for a missing socket).
 
 ```python
-from sentiencedb import Database, Driver
+from sentiencedb import Driver, connect
 
-db = Database.connect(Driver.SQLITE, ":memory:")
+db = connect(Driver.SQLITE, ":memory:")
 print(db.dialect.driver, db.dialect.version > 0)  # sqlite True
 db.close()
 ```
 
 ```python
 # Requires a PostgreSQL server (docker compose up -d postgres).
-from sentiencedb import Database, Driver, NetworkSocket
+from sentiencedb import Driver, NetworkSocket, connect
 
-db = Database.connect(
+db = connect(
     Driver.PGSQL,
     "postgres",
     NetworkSocket("localhost", 5432, username="postgres", password=None),
@@ -114,27 +114,27 @@ print(db.query("SHOW TIME ZONE").scalar())  # UTC
 db.close()
 ```
 
-### Shortcut constructors
+### Shortcut functions
 
-| Method | Signature |
+| Function | Signature |
 |---|---|
-| `Database.connect_sqlite` | `(name=":memory:", *, queries=(), options=None, debug=None)` |
-| `Database.connect_postgresql` | `(name, *, host="localhost", port=5432, username=None, password=None, unix_socket=None, queries=(), options=None, debug=None)` |
-| `Database.connect_mysql` | same as PostgreSQL, `port=3306` |
-| `Database.connect_mariadb` | same as PostgreSQL, `port=3306` |
+| `connect_sqlite` | `(name=":memory:", *, queries=(), options=None, debug=None)` |
+| `connect_postgresql` | `(name, *, host="localhost", port=5432, username=None, password=None, unix_socket=None, queries=(), options=None, debug=None)` |
+| `connect_mysql` | same as PostgreSQL, `port=3306` |
+| `connect_mariadb` | same as PostgreSQL, `port=3306` |
 
 ```python
 # Requires a MySQL server (docker compose up -d mysql) with a "sentiencedb" database.
-from sentiencedb import Database
+from sentiencedb import connect_mysql
 
-db = Database.connect_mysql("sentiencedb", host="127.0.0.1", username="root", password="")
+db = connect_mysql("sentiencedb", host="127.0.0.1", username="root", password="")
 print(db.dialect.driver)  # mysql
 db.close()
 ```
 
 ### Sockets
 
-Server engines need a socket. The `connect_*` helpers build one for you: a `UnixSocket` when `unix_socket` is given,
+Server engines need a socket. The `connect_*` functions build one for you: a `UnixSocket` when `unix_socket` is given,
 otherwise a `NetworkSocket(host, port, username, password)`.
 
 - `NetworkSocket(host, port, username=None, password=None)`: TCP.
@@ -143,10 +143,10 @@ otherwise a `NetworkSocket(host, port, username, password)`.
 
 ```python
 # Requires a local PostgreSQL server listening on /var/run/postgresql.
-from sentiencedb import Database, Driver, UnixSocket
+from sentiencedb import Driver, UnixSocket, connect, connect_postgresql
 
-db = Database.connect(Driver.PGSQL, "app", UnixSocket("/var/run/postgresql", username="app"))
-db = Database.connect_postgresql("app", unix_socket="/var/run/postgresql", username="app")
+db = connect(Driver.PGSQL, "app", UnixSocket("/var/run/postgresql", username="app"))
+db = connect_postgresql("app", unix_socket="/var/run/postgresql", username="app")
 ```
 
 ### Startup queries
@@ -156,7 +156,7 @@ Since each thread gets its own connection (see [Threading](#threading)), put per
 running them once after connecting.
 
 ```python
-with Database.connect_sqlite(queries=["PRAGMA foreign_keys = ON"]) as db:
+with connect_sqlite(queries=["PRAGMA foreign_keys = ON"]) as db:
     print(db.query("PRAGMA foreign_keys").scalar())  # 1
 ```
 
@@ -202,7 +202,7 @@ Parameters that have no SQL literal (`inf`, `nan`, driver specific types) are sh
 ```python
 import time
 
-from sentiencedb import Database
+from sentiencedb import connect_sqlite
 
 
 def debug(query: str, start: float, error: str | None) -> None:
@@ -210,7 +210,7 @@ def debug(query: str, start: float, error: str | None) -> None:
     print(f"{query} [{status}, {(time.time() - start) * 1000:.0f} ms]")
 
 
-db = Database.connect_sqlite(debug=debug)
+db = connect_sqlite(debug=debug)
 db.prepared("SELECT ? AS answer", [42])  # prints: SELECT 42 AS answer [ok, 0 ms]
 db.close()
 ```
@@ -250,9 +250,9 @@ Limitations and workarounds:
 - MySQL's executable comments (`/*! ... */`) are skipped like any other comment.
 
 ```python
-from sentiencedb import Database, QueryWithParams
+from sentiencedb import QueryWithParams, connect_sqlite
 
-db = Database.connect_sqlite()
+db = connect_sqlite()
 db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
 db.prepared("INSERT INTO notes (body) VALUES (?), (?)", ["first", "100% done"])
 
@@ -306,9 +306,9 @@ Helpers that create `Sql` objects and other values:
 The rest of this guide builds on one in-memory SQLite database:
 
 ```python
-from sentiencedb import Database, alias, expression, expressionf, identifier, raw
+from sentiencedb import alias, connect_sqlite, expression, expressionf, identifier, raw
 
-db = Database.connect_sqlite(options={"foreign_keys": True})
+db = connect_sqlite(options={"foreign_keys": True})
 db.exec("CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT)")
 
 query = (
@@ -1010,7 +1010,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 path = os.path.join(tempfile.mkdtemp(), "app.db")
-shared = Database.connect_sqlite(path, options={"journal_mode": "WAL", "max_connections": 2, "acquire_timeout": 10})
+shared = connect_sqlite(path, options={"journal_mode": "WAL", "max_connections": 2, "acquire_timeout": 10})
 shared.create_table("hits").identity("id").integer("worker").execute()
 
 

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 2.1.0
+
+### Breaking changes
+
+- The connect constructors are module-level functions instead of `Database` class methods: `Database.connect(...)`
+  is `connect(...)`, `Database.connect_sqlite(...)` is `connect_sqlite(...)`, and likewise `connect_postgresql`,
+  `connect_mysql` and `connect_mariadb`. All are exported from `sentiencedb`, with unchanged signatures.
+
 ## 2.0.1
 
 ### Changed

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sentiencedb import Database, raw
+from sentiencedb import connect_sqlite, raw
 from sentiencedb.queries import DeleteQuery, SelectQuery, UpdateQuery
 
 
@@ -31,7 +31,7 @@ def test_returning_a_str_is_one_column(mock_database: Any, sqlite_dialect: Any) 
 
 
 def test_live_str_column_lists() -> None:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         db.create_table("t").varchar("email").unique_constraint("email").execute()
         db.create_index("t", "by_email").columns("email").execute()
         db.insert("t").values({"email": "a"}, {"email": "b"}).execute()
@@ -43,7 +43,7 @@ def test_live_str_column_lists() -> None:
 
 def test_live_count_keeps_aggregates_and_limits() -> None:
     """Replacing the select list with ``1`` must not turn an aggregate (one row) into one row per input row."""
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         db.create_table("t").integer("n").execute()
         db.insert("t").values({"n": 1}, {"n": 2}, {"n": 2}).execute()
 

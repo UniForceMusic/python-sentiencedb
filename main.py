@@ -18,6 +18,7 @@ from sentiencedb import (
     UniqueViolationError,
     WhereGroup,
     alias,
+    connect_sqlite,
     current_timestamp,
     expressionf,
     identifier,
@@ -36,10 +37,10 @@ def debug_callback(query: str, starttime: float, error: str | None) -> None:
     if error:
         print(f"[ERROR] {error}")
 
-db = Database.connect_sqlite(":memory:", debug=debug_callback)
-# db = Database.connect_postgresql("postgres", host="localhost", username="postgres", debug=debug_callback)
-# db = Database.connect_mysql("sentiencedb", host="localhost", username="root", password="", debug=debug_callback)
-# db = Database.connect_mariadb("sentiencedb", host="localhost", port=3307, username="root", debug=debug_callback)
+db = connect_sqlite(":memory:", debug=debug_callback)
+# db = connect_postgresql("postgres", host="localhost", username="postgres", debug=debug_callback)
+# db = connect_mysql("sentiencedb", host="localhost", username="root", password="", debug=debug_callback)
+# db = connect_mariadb("sentiencedb", host="localhost", port=3307, username="root", debug=debug_callback)
 
 db.create_table("users").if_not_exists().identity("id").varchar("name", not_null=True).integer("age").execute()
 

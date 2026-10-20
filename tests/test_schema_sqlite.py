@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from sentiencedb import Database, ReferentialActionEnum, current_timestamp, raw
+from sentiencedb import Database, ReferentialActionEnum, connect_sqlite, current_timestamp, raw
 from sentiencedb.queries.enums import TypeEnum
 from sentiencedb.queries.objects.ddl import Column, ForeignKeyConstraint, Index, Type, UniqueConstraint
 
@@ -20,7 +20,7 @@ SET_NULL = ReferentialActionEnum.SET_NULL
 
 @pytest.fixture
 def db() -> Iterator[Database]:
-    with Database.connect_sqlite() as db:
+    with connect_sqlite() as db:
         create_tables(db)
         yield db
 
@@ -95,7 +95,7 @@ def copy_table(db: Database, source: str, target: str) -> None:
 def test_schemas_are_database_files(tmp_path: Path) -> None:
     path = tmp_path / "main.sqlite"
 
-    with Database.connect_sqlite(str(path)) as db:
+    with connect_sqlite(str(path)) as db:
         db.exec(f"ATTACH DATABASE '{tmp_path / 'other.sqlite'}' AS other")
 
         assert db.information_schema_schemas() == [str(path), str(tmp_path / "other.sqlite")]
