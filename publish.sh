@@ -115,11 +115,11 @@ import sys
 from importlib.resources import files
 
 import sentiencedb
-from sentiencedb import Database
+from sentiencedb import connect_sqlite
 
 assert sentiencedb.__version__ == sys.argv[1], sentiencedb.__version__
 assert files("sentiencedb").joinpath("py.typed").is_file(), "py.typed missing from the wheel"
-db = Database.connect_sqlite(":memory:")
+db = connect_sqlite(":memory:")
 assert db.query("SELECT 1 AS one").fetch_dicts() == [{"one": 1}]
 print(f"sentiencedb {sentiencedb.__version__} imports and runs from the wheel")
 EOF
